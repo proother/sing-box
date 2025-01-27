@@ -52,7 +52,7 @@ builds:
     env:
       - CGO_ENABLED=0
       - GOROOT={{ .Env.GOPATH }}/go1.20.14
-    gobinary: "{{ .Env.GOPATH }}/go1.20.14/bin/go"
+    tool: "{{ .Env.GOPATH }}/go1.20.14/bin/go"
     targets:
       - windows_amd64_v1
       - windows_386
@@ -95,10 +95,11 @@ archives:
     builds:
       - main
       - android
-    format: tar.gz
+    formats:
+      - tar.gz
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [ 'zip' ]
     wrap_in_directory: true
     files:
       - LICENSE

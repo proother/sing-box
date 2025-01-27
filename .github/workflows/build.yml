@@ -144,7 +144,7 @@ jobs:
             ~/go/go1.20.14
           key: go120
       - name: Setup legacy Go
-        if: matrix.require_legacy_go == 'true' && steps.cache-legacy-go.outputs.cache-hit != 'true'
+        if: matrix.require_legacy_go && steps.cache-legacy-go.outputs.cache-hit != 'true'
         run: |-
           wget https://dl.google.com/go/go1.20.14.linux-amd64.tar.gz
           tar -xzf go1.20.14.linux-amd64.tar.gz
