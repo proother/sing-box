@@ -161,11 +161,6 @@ type Service struct {
 	trackingGroup sync.WaitGroup
 	shuttingDown  bool
 
-	// Legacy mode (single credential)
-	legacyCredential *defaultCredential
-	legacyProvider   credentialProvider
-
-	// Multi-credential mode
 	providers      map[string]credentialProvider
 	allCredentials []Credential
 	userConfigMap  map[string]*option.CCMUser
@@ -173,6 +168,25 @@ type Service struct {
 
 func NewService(ctx context.Context, logger log.ContextLogger, tag string, options option.CCMServiceOptions) (adapter.Service, error) {
 	initCCMUserAgent(logger)
+
+	hasLegacy := options.CredentialPath != "" || options.UsagesPath != "" || options.Detour != ""
+	if hasLegacy && len(options.Credentials) > 0 {
+		return nil, E.New("credential_path/usages_path/detour and credentials are mutually exclusive")
+	}
+	if len(options.Credentials) == 0 {
+		options.Credentials = []option.CCMCredential{{
+			Type: "default",
+			Tag:  "default",
+			DefaultOptions: option.CCMDefaultCredentialOptions{
+				CredentialPath: options.CredentialPath,
+				UsagesPath:     options.UsagesPath,
+				Detour:         options.Detour,
+			},
+		}}
+		options.CredentialPath = ""
+		options.UsagesPath = ""
+		options.Detour = ""
+	}
 
 	err := validateCCMOptions(options)
 	if err != nil {
@@ -198,32 +212,18 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		userManager: userManager,
 	}
 
-	if len(options.Credentials) > 0 {
-		providers, allCredentials, err := buildCredentialProviders(ctx, options, logger)
-		if err != nil {
-			return nil, E.Cause(err, "build credential providers")
-		}
-		service.providers = providers
-		service.allCredentials = allCredentials
-
-		userConfigMap := make(map[string]*option.CCMUser)
-		for i := range options.Users {
-			userConfigMap[options.Users[i].Name] = &options.Users[i]
-		}
-		service.userConfigMap = userConfigMap
-	} else {
-		credential, err := newDefaultCredential(ctx, "default", option.CCMDefaultCredentialOptions{
-			CredentialPath: options.CredentialPath,
-			UsagesPath:     options.UsagesPath,
-			Detour:         options.Detour,
-		}, logger)
-		if err != nil {
-			return nil, err
-		}
-		service.legacyCredential = credential
-		service.legacyProvider = &singleCredentialProvider{credential: credential}
-		service.allCredentials = []Credential{credential}
+	providers, allCredentials, err := buildCredentialProviders(ctx, options, logger)
+	if err != nil {
+		return nil, E.Cause(err, "build credential providers")
 	}
+	service.providers = providers
+	service.allCredentials = allCredentials
+
+	userConfigMap := make(map[string]*option.CCMUser)
+	for i := range options.Users {
+		userConfigMap[options.Users[i].Name] = &options.Users[i]
+	}
+	service.userConfigMap = userConfigMap
 
 	if options.TLS != nil {
 		tlsConfig, err := tls.NewServer(ctx, logger, common.PtrValueOrDefault(options.TLS))

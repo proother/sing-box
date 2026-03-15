@@ -15,42 +15,43 @@ func (s *Service) handleStatusEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(s.options.Users) == 0 {
-		writeJSONError(w, r, http.StatusForbidden, "authentication_error", "status endpoint requires user authentication")
-		return
-	}
+	var provider credentialProvider
+	var userConfig *option.OCMUser
+	if len(s.options.Users) > 0 {
+		if r.Header.Get("X-Api-Key") != "" || r.Header.Get("Api-Key") != "" {
+			writeJSONError(w, r, http.StatusBadRequest, "invalid_request_error",
+				"API key authentication is not supported; use Authorization: Bearer with an OCM user token")
+			return
+		}
 
-	if r.Header.Get("X-Api-Key") != "" || r.Header.Get("Api-Key") != "" {
-		writeJSONError(w, r, http.StatusBadRequest, "invalid_request_error",
-			"API key authentication is not supported; use Authorization: Bearer with an OCM user token")
-		return
-	}
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			writeJSONError(w, r, http.StatusUnauthorized, "authentication_error", "missing api key")
+			return
+		}
+		clientToken := strings.TrimPrefix(authHeader, "Bearer ")
+		if clientToken == authHeader {
+			writeJSONError(w, r, http.StatusUnauthorized, "authentication_error", "invalid api key format")
+			return
+		}
+		username, ok := s.userManager.Authenticate(clientToken)
+		if !ok {
+			writeJSONError(w, r, http.StatusUnauthorized, "authentication_error", "invalid api key")
+			return
+		}
 
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		writeJSONError(w, r, http.StatusUnauthorized, "authentication_error", "missing api key")
-		return
+		userConfig = s.userConfigMap[username]
+		var err error
+		provider, err = credentialForUser(s.userConfigMap, s.providers, username)
+		if err != nil {
+			writeJSONError(w, r, http.StatusInternalServerError, "api_error", err.Error())
+			return
+		}
+	} else {
+		provider = s.providers[s.options.Credentials[0].Tag]
 	}
-	clientToken := strings.TrimPrefix(authHeader, "Bearer ")
-	if clientToken == authHeader {
-		writeJSONError(w, r, http.StatusUnauthorized, "authentication_error", "invalid api key format")
-		return
-	}
-	username, ok := s.userManager.Authenticate(clientToken)
-	if !ok {
-		writeJSONError(w, r, http.StatusUnauthorized, "authentication_error", "invalid api key")
-		return
-	}
-
-	userConfig := s.userConfigMap[username]
-	if userConfig == nil {
-		writeJSONError(w, r, http.StatusInternalServerError, "api_error", "user config not found")
-		return
-	}
-
-	provider, err := credentialForUser(s.userConfigMap, s.providers, s.legacyProvider, username)
-	if err != nil {
-		writeJSONError(w, r, http.StatusInternalServerError, "api_error", err.Error())
+	if provider == nil {
+		writeJSONError(w, r, http.StatusInternalServerError, "api_error", "no credential available")
 		return
 	}
 
@@ -72,10 +73,10 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		if !credential.isAvailable() {
 			continue
 		}
-		if userConfig.ExternalCredential != "" && credential.tagName() == userConfig.ExternalCredential {
+		if userConfig != nil && userConfig.ExternalCredential != "" && credential.tagName() == userConfig.ExternalCredential {
 			continue
 		}
-		if !userConfig.AllowExternalUsage && credential.isExternal() {
+		if userConfig != nil && !userConfig.AllowExternalUsage && credential.isExternal() {
 			continue
 		}
 		weight := credential.planWeight()
@@ -100,7 +101,7 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 }
 
 func (s *Service) rewriteResponseHeadersForExternalUser(headers http.Header, userConfig *option.OCMUser) {
-	provider, err := credentialForUser(s.userConfigMap, s.providers, s.legacyProvider, userConfig.Name)
+	provider, err := credentialForUser(s.userConfigMap, s.providers, userConfig.Name)
 	if err != nil {
 		return
 	}

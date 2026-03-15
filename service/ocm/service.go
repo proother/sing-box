@@ -176,17 +176,31 @@ type Service struct {
 	webSocketConns  map[*webSocketSession]struct{}
 	shuttingDown    bool
 
-	// Legacy mode
-	legacyCredential *defaultCredential
-	legacyProvider   credentialProvider
-
-	// Multi-credential mode
 	providers      map[string]credentialProvider
 	allCredentials []Credential
 	userConfigMap  map[string]*option.OCMUser
 }
 
 func NewService(ctx context.Context, logger log.ContextLogger, tag string, options option.OCMServiceOptions) (adapter.Service, error) {
+	hasLegacy := options.CredentialPath != "" || options.UsagesPath != "" || options.Detour != ""
+	if hasLegacy && len(options.Credentials) > 0 {
+		return nil, E.New("credential_path/usages_path/detour and credentials are mutually exclusive")
+	}
+	if len(options.Credentials) == 0 {
+		options.Credentials = []option.OCMCredential{{
+			Type: "default",
+			Tag:  "default",
+			DefaultOptions: option.OCMDefaultCredentialOptions{
+				CredentialPath: options.CredentialPath,
+				UsagesPath:     options.UsagesPath,
+				Detour:         options.Detour,
+			},
+		}}
+		options.CredentialPath = ""
+		options.UsagesPath = ""
+		options.Detour = ""
+	}
+
 	err := validateOCMOptions(options)
 	if err != nil {
 		return nil, E.Cause(err, "validate options")
@@ -212,32 +226,18 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		webSocketConns: make(map[*webSocketSession]struct{}),
 	}
 
-	if len(options.Credentials) > 0 {
-		providers, allCredentials, err := buildOCMCredentialProviders(ctx, options, logger)
-		if err != nil {
-			return nil, E.Cause(err, "build credential providers")
-		}
-		service.providers = providers
-		service.allCredentials = allCredentials
-
-		userConfigMap := make(map[string]*option.OCMUser)
-		for i := range options.Users {
-			userConfigMap[options.Users[i].Name] = &options.Users[i]
-		}
-		service.userConfigMap = userConfigMap
-	} else {
-		credential, err := newDefaultCredential(ctx, "default", option.OCMDefaultCredentialOptions{
-			CredentialPath: options.CredentialPath,
-			UsagesPath:     options.UsagesPath,
-			Detour:         options.Detour,
-		}, logger)
-		if err != nil {
-			return nil, err
-		}
-		service.legacyCredential = credential
-		service.legacyProvider = &singleCredentialProvider{credential: credential}
-		service.allCredentials = []Credential{credential}
+	providers, allCredentials, err := buildOCMCredentialProviders(ctx, options, logger)
+	if err != nil {
+		return nil, E.Cause(err, "build credential providers")
 	}
+	service.providers = providers
+	service.allCredentials = allCredentials
+
+	userConfigMap := make(map[string]*option.OCMUser)
+	for i := range options.Users {
+		userConfigMap[options.Users[i].Name] = &options.Users[i]
+	}
+	service.userConfigMap = userConfigMap
 
 	if options.TLS != nil {
 		tlsConfig, err := tls.NewServer(ctx, logger, common.PtrValueOrDefault(options.TLS))
@@ -270,11 +270,9 @@ func (s *Service) Start(stage adapter.StartStage) error {
 			s.interruptWebSocketSessionsForCredential(tag)
 		})
 	}
-	if len(s.options.Credentials) > 0 {
-		err := validateOCMCompositeCredentialModes(s.options, s.providers)
-		if err != nil {
-			return E.Cause(err, "validate loaded credentials")
-		}
+	err := validateOCMCompositeCredentialModes(s.options, s.providers)
+	if err != nil {
+		return E.Cause(err, "validate loaded credentials")
 	}
 
 	router := chi.NewRouter()

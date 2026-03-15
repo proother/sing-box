@@ -53,9 +53,9 @@ func extractWeeklyCycleHint(headers http.Header) *WeeklyCycleHint {
 
 func (s *Service) resolveCredentialProvider(username string) (credentialProvider, error) {
 	if len(s.options.Users) > 0 {
-		return credentialForUser(s.userConfigMap, s.providers, s.legacyProvider, username)
+		return credentialForUser(s.userConfigMap, s.providers, username)
 	}
-	provider := noUserCredentialProvider(s.providers, s.legacyProvider, s.options)
+	provider := s.providers[s.options.Credentials[0].Tag]
 	if provider == nil {
 		return nil, E.New("no credential available")
 	}
@@ -117,14 +117,14 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(s.options.Users) > 0 {
 		userConfig = s.userConfigMap[username]
 		var err error
-		provider, err = credentialForUser(s.userConfigMap, s.providers, s.legacyProvider, username)
+		provider, err = credentialForUser(s.userConfigMap, s.providers, username)
 		if err != nil {
 			s.logger.ErrorContext(ctx, "resolve credential: ", err)
 			writeJSONError(w, r, http.StatusInternalServerError, "api_error", err.Error())
 			return
 		}
 	} else {
-		provider = noUserCredentialProvider(s.providers, s.legacyProvider, s.options)
+		provider = s.providers[s.options.Credentials[0].Tag]
 	}
 	if provider == nil {
 		writeJSONError(w, r, http.StatusInternalServerError, "api_error", "no credential available")
