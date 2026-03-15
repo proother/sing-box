@@ -588,10 +588,8 @@ func (c *externalCredential) pollUsage(ctx context.Context) {
 
 	response, err := c.doPollUsageRequest(ctx)
 	if err != nil {
-		if !c.isPollBackoffAtCap() {
-			c.logger.Error("poll usage for ", c.tag, ": ", err)
-		}
-		c.incrementPollFailures()
+		c.logger.Debug("poll usage for ", c.tag, ": ", err)
+		c.clearPollFailures()
 		return
 	}
 	defer response.Body.Close()
@@ -599,16 +597,7 @@ func (c *externalCredential) pollUsage(ctx context.Context) {
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		c.logger.Debug("poll usage for ", c.tag, ": status ", response.StatusCode, " ", string(body))
-		// 404 means the remote does not have a status endpoint yet;
-		// usage will be updated passively from response headers.
-		if response.StatusCode == http.StatusNotFound {
-			c.stateAccess.Lock()
-			c.state.consecutivePollFailures = 0
-			c.checkTransitionLocked()
-			c.stateAccess.Unlock()
-		} else {
-			c.incrementPollFailures()
-		}
+		c.clearPollFailures()
 		return
 	}
 
@@ -620,7 +609,7 @@ func (c *externalCredential) pollUsage(ctx context.Context) {
 	err = json.NewDecoder(response.Body).Decode(&statusResponse)
 	if err != nil {
 		c.logger.Debug("poll usage for ", c.tag, ": decode: ", err)
-		c.incrementPollFailures()
+		c.clearPollFailures()
 		return
 	}
 
@@ -664,34 +653,14 @@ func (c *externalCredential) markUsagePollAttempted() {
 }
 
 func (c *externalCredential) pollBackoff(baseInterval time.Duration) time.Duration {
-	c.stateAccess.RLock()
-	failures := c.state.consecutivePollFailures
-	c.stateAccess.RUnlock()
-	if failures <= 0 {
-		return baseInterval
-	}
-	backoff := failedPollRetryInterval * time.Duration(1<<(failures-1))
-	if backoff > httpRetryMaxBackoff {
-		return httpRetryMaxBackoff
-	}
-	return backoff
+	return baseInterval
 }
 
-func (c *externalCredential) isPollBackoffAtCap() bool {
-	c.stateAccess.RLock()
-	defer c.stateAccess.RUnlock()
-	failures := c.state.consecutivePollFailures
-	return failures > 0 && failedPollRetryInterval*time.Duration(1<<(failures-1)) >= httpRetryMaxBackoff
-}
-
-func (c *externalCredential) incrementPollFailures() {
+func (c *externalCredential) clearPollFailures() {
 	c.stateAccess.Lock()
-	c.state.consecutivePollFailures++
-	shouldInterrupt := c.checkTransitionLocked()
+	c.state.consecutivePollFailures = 0
+	c.checkTransitionLocked()
 	c.stateAccess.Unlock()
-	if shouldInterrupt {
-		c.interruptConnections()
-	}
 }
 
 func (c *externalCredential) usageTrackerOrNil() *AggregatedUsage {
