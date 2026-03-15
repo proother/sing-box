@@ -70,7 +70,7 @@ Claude Code OAuth 凭据文件的路径。
 
 设置后，顶层 `credential_path`、`usages_path` 和 `detour` 被禁止。每个用户必须指定 `credential` 标签。
 
-每个凭据有一个 `type` 字段（`default`、`external`、`balancer` 或 `fallback`）和一个必填的 `tag` 字段。
+每个凭据有一个 `type` 字段（`default`、`external` 或 `balancer`）和一个必填的 `tag` 字段。
 
 ##### 默认凭据
 
@@ -94,8 +94,8 @@ Claude Code OAuth 凭据文件的路径。
 - `detour`：此凭据用于连接 Claude API 的出站标签。
 - `reserve_5h`：5 小时窗口的保留阈值（1-99）。凭据在利用率达到 (100-N)% 时暂停。与 `limit_5h` 冲突。
 - `reserve_weekly`：每周窗口的保留阈值（1-99）。凭据在利用率达到 (100-N)% 时暂停。与 `limit_weekly` 冲突。
-- `limit_5h`：5 小时窗口的显式利用率上限（1-99）。凭据在利用率达到此值时暂停。与 `reserve_5h` 冲突。
-- `limit_weekly`：每周窗口的显式利用率上限（1-99）。凭据在利用率达到此值时暂停。与 `reserve_weekly` 冲突。
+- `limit_5h`：5 小时窗口的显式利用率上限（0-100）。`0` 表示未设置显式上限。凭据在利用率达到此值时暂停。与 `reserve_5h` 冲突。
+- `limit_weekly`：每周窗口的显式利用率上限（0-100）。`0` 表示未设置显式上限。凭据在利用率达到此值时暂停。与 `reserve_weekly` 冲突。
 
 ##### 均衡凭据
 
@@ -111,22 +111,23 @@ Claude Code OAuth 凭据文件的路径。
 
 根据选择的策略将会话分配给默认凭据。会话保持粘性，直到分配的凭据触发速率限制。
 
-- `strategy`：选择策略。可选值：`least_used` `round_robin` `random`。默认使用 `least_used`。
+- `strategy`：选择策略。可选值：`least_used` `round_robin` `random` `fallback`。默认使用 `least_used`。
 - `credentials`：==必填== 默认凭据标签列表。
 - `poll_interval`：轮询上游使用 API 的间隔。默认 `60s`。
 
-##### 回退凭据
+##### 回退策略
 
 ```json
 {
   "tag": "backup",
-  "type": "fallback",
+  "type": "balancer",
+  "strategy": "fallback",
   "credentials": ["a", "b"],
   "poll_interval": "30s"
 }
 ```
 
-按顺序使用凭据。当前凭据耗尽后切换到下一个。
+将 `strategy` 设为 `fallback` 的均衡凭据会按顺序使用凭据。当前凭据耗尽后切换到下一个。
 
 - `credentials`：==必填== 有序的默认凭据标签列表。
 - `poll_interval`：轮询上游使用 API 的间隔。默认 `60s`。
@@ -150,11 +151,11 @@ Claude Code OAuth 凭据文件的路径。
 
 通过远程 CCM 实例代理请求，而非使用本地 OAuth 凭据。
 
-- `url`：远程 CCM 实例的 URL。在反向接收模式下省略。
+- `url`：远程 CCM 实例的 URL。省略时，此凭据作为仅等待入站反向连接的接收器。
 - `server`：覆盖拨号的服务器地址，与 URL 主机名分开。
 - `server_port`：覆盖拨号的服务器端口。
 - `token`：==必填== 远程实例的身份验证令牌。
-- `reverse`：启用反向代理模式。当设置了 `url` 和 `reverse` 时，作为连接器主动拨出到远程实例。当 `url` 为空时，作为接收器等待入站反向连接。
+- `reverse`：启用连接器模式。要求设置 `url`。启用后，此凭据会主动拨出到远程实例的 `/ccm/v1/reverse`，且不能直接为本地请求提供服务。当设置了 `url` 但未启用 `reverse` 时，此凭据会正常通过远程实例转发请求，并在反向连接建立后优先使用该反向连接。
 - `detour`：用于连接远程实例的出站标签。
 - `usages_path`：可选的使用跟踪文件。
 - `poll_interval`：轮询远程状态端点的间隔。默认 `30m`。
@@ -204,7 +205,7 @@ Claude Code OAuth 凭据文件的路径。
 !!! question "自 sing-box 1.14.0 起"
 
 - `credential`：此用户使用的凭据标签。设置 `credentials` 时==必填==。
-- `external_credential`：专用于为此用户提供服务的外部凭据标签。响应的速率限制头会被重写为来自此用户所有其他可用凭据的聚合利用率。
+- `external_credential`：仅用于用此用户其他可用凭据的聚合利用率重写响应速率限制头的外部凭据标签。它不参与请求路由；请求选择仍由 `credential` 和 `allow_external_usage` 决定。
 - `allow_external_usage`：允许此用户使用外部凭据。默认为 `false`。
 
 #### headers

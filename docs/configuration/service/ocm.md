@@ -66,7 +66,7 @@ List of credential configurations for multi-credential mode.
 
 When set, top-level `credential_path`, `usages_path`, and `detour` are forbidden. Each user must specify a `credential` tag.
 
-Each credential has a `type` field (`default`, `external`, `balancer`, or `fallback`) and a required `tag` field.
+Each credential has a `type` field (`default`, `external`, or `balancer`) and a required `tag` field.
 
 ##### Default Credential
 
@@ -90,8 +90,8 @@ A single OAuth credential file. The `type` field can be omitted (defaults to `de
 - `detour`: Outbound tag for connecting to the OpenAI API with this credential.
 - `reserve_5h`: Reserve threshold (1-99) for primary rate limit window. Credential pauses at (100-N)% utilization. Conflict with `limit_5h`.
 - `reserve_weekly`: Reserve threshold (1-99) for secondary (weekly) rate limit window. Credential pauses at (100-N)% utilization. Conflict with `limit_weekly`.
-- `limit_5h`: Explicit utilization cap (1-99) for primary rate limit window. Credential pauses when utilization reaches this value. Conflict with `reserve_5h`.
-- `limit_weekly`: Explicit utilization cap (1-99) for secondary (weekly) rate limit window. Credential pauses when utilization reaches this value. Conflict with `reserve_weekly`.
+- `limit_5h`: Explicit utilization cap (0-100) for primary rate limit window. `0` means unset. Credential pauses when utilization reaches this value. Conflict with `reserve_5h`.
+- `limit_weekly`: Explicit utilization cap (0-100) for secondary (weekly) rate limit window. `0` means unset. Credential pauses when utilization reaches this value. Conflict with `reserve_weekly`.
 
 ##### Balancer Credential
 
@@ -107,22 +107,23 @@ A single OAuth credential file. The `type` field can be omitted (defaults to `de
 
 Assigns sessions to default credentials based on the selected strategy. Sessions are sticky until the assigned credential hits a rate limit.
 
-- `strategy`: Selection strategy. One of `least_used` `round_robin` `random`. `least_used` will be used by default.
+- `strategy`: Selection strategy. One of `least_used` `round_robin` `random` `fallback`. `least_used` will be used by default.
 - `credentials`: ==Required== List of default credential tags.
 - `poll_interval`: How often to poll upstream usage API. Default `60s`.
 
-##### Fallback Credential
+##### Fallback Strategy
 
 ```json
 {
   "tag": "backup",
-  "type": "fallback",
+  "type": "balancer",
+  "strategy": "fallback",
   "credentials": ["a", "b"],
   "poll_interval": "30s"
 }
 ```
 
-Uses credentials in order. Falls through to the next when the current one is exhausted.
+A balancer with `strategy: "fallback"` uses credentials in order. It falls through to the next when the current one is exhausted.
 
 - `credentials`: ==Required== Ordered list of default credential tags.
 - `poll_interval`: How often to poll upstream usage API. Default `60s`.
@@ -146,11 +147,11 @@ Uses credentials in order. Falls through to the next when the current one is exh
 
 Proxies requests through a remote OCM instance instead of using a local OAuth credential.
 
-- `url`: URL of the remote OCM instance. Omit in reverse receiver mode.
+- `url`: URL of the remote OCM instance. Omit to create a receiver that only waits for inbound reverse connections.
 - `server`: Override server address for dialing, separate from URL hostname.
 - `server_port`: Override server port for dialing.
 - `token`: ==Required== Authentication token for the remote instance.
-- `reverse`: Enable reverse proxy mode. When `url` is set with `reverse`, acts as a connector that dials out to the remote instance. When `url` is empty, acts as a receiver waiting for inbound reverse connections.
+- `reverse`: Enable connector mode. Requires `url`. A connector dials out to `/ocm/v1/reverse` on the remote instance and cannot serve local requests directly. When `url` is set without `reverse`, the credential proxies requests through the remote instance normally and prefers an established reverse connection when one is available.
 - `detour`: Outbound tag for connecting to the remote instance.
 - `usages_path`: Optional usage tracking file.
 - `poll_interval`: How often to poll the remote status endpoint. Default `30m`.
@@ -200,7 +201,7 @@ Object fields:
 !!! question "Since sing-box 1.14.0"
 
 - `credential`: Credential tag to use for this user. ==Required== when `credentials` is set.
-- `external_credential`: Tag of an external credential dedicated to serving this user. Response rate-limit headers are rewritten with aggregated utilization from all other credentials available to this user.
+- `external_credential`: Tag of an external credential used only to rewrite response rate-limit headers with aggregated utilization from this user's other available credentials. It does not control request routing; request selection still comes from `credential` and `allow_external_usage`.
 - `allow_external_usage`: Allow this user to use external credentials. `false` by default.
 
 #### headers
