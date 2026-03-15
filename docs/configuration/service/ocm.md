@@ -13,7 +13,10 @@ It handles OAuth authentication with OpenAI's API on your local machine while al
 !!! quote "Changes in sing-box 1.14.0"
 
     :material-plus: [credentials](#credentials)  
-    :material-alert: [users](#users)
+    :material-alert: [credential_path](#credential_path)  
+    :material-alert: [usages_path](#usages_path)  
+    :material-alert: [users](#users)  
+    :material-alert: [detour](#detour)
 
 ### Structure
 
@@ -49,6 +52,8 @@ If not specified, defaults to:
 
 Refreshed tokens are automatically written back to the same location.
 
+!!! question "Since sing-box 1.14.0"
+
 When `credential_path` points to a file, the service can start before the file exists. The credential becomes available automatically after the file is created or updated, and becomes unavailable immediately if the file is later removed or becomes invalid.
 
 Conflict with `credentials`.
@@ -61,7 +66,7 @@ List of credential configurations for multi-credential mode.
 
 When set, top-level `credential_path`, `usages_path`, and `detour` are forbidden. Each user must specify a `credential` tag.
 
-Each credential has a `type` field (`default`, `balancer`, or `fallback`) and a required `tag` field.
+Each credential has a `type` field (`default`, `external`, `balancer`, or `fallback`) and a required `tag` field.
 
 ##### Default Credential
 
@@ -72,7 +77,9 @@ Each credential has a `type` field (`default`, `balancer`, or `fallback`) and a 
   "usages_path": "/path/to/usages.json",
   "detour": "",
   "reserve_5h": 20,
-  "reserve_weekly": 20
+  "reserve_weekly": 20,
+  "limit_5h": 0,
+  "limit_weekly": 0
 }
 ```
 
@@ -81,8 +88,10 @@ A single OAuth credential file. The `type` field can be omitted (defaults to `de
 - `credential_path`: Path to the credentials file. Same defaults as top-level `credential_path`.
 - `usages_path`: Optional usage tracking file for this credential.
 - `detour`: Outbound tag for connecting to the OpenAI API with this credential.
-- `reserve_5h`: Reserve threshold (1-99) for primary rate limit window. Credential pauses at (100-N)% utilization.
-- `reserve_weekly`: Reserve threshold (1-99) for secondary (weekly) rate limit window. Credential pauses at (100-N)% utilization.
+- `reserve_5h`: Reserve threshold (1-99) for primary rate limit window. Credential pauses at (100-N)% utilization. Conflict with `limit_5h`.
+- `reserve_weekly`: Reserve threshold (1-99) for secondary (weekly) rate limit window. Credential pauses at (100-N)% utilization. Conflict with `limit_weekly`.
+- `limit_5h`: Explicit utilization cap (1-99) for primary rate limit window. Credential pauses when utilization reaches this value. Conflict with `reserve_5h`.
+- `limit_weekly`: Explicit utilization cap (1-99) for secondary (weekly) rate limit window. Credential pauses when utilization reaches this value. Conflict with `reserve_weekly`.
 
 ##### Balancer Credential
 
@@ -118,6 +127,34 @@ Uses credentials in order. Falls through to the next when the current one is exh
 - `credentials`: ==Required== Ordered list of default credential tags.
 - `poll_interval`: How often to poll upstream usage API. Default `60s`.
 
+##### External Credential
+
+```json
+{
+  "tag": "remote",
+  "type": "external",
+  "url": "",
+  "server": "",
+  "server_port": 0,
+  "token": "",
+  "reverse": false,
+  "detour": "",
+  "usages_path": "",
+  "poll_interval": "30m"
+}
+```
+
+Proxies requests through a remote OCM instance instead of using a local OAuth credential.
+
+- `url`: URL of the remote OCM instance. Omit in reverse receiver mode.
+- `server`: Override server address for dialing, separate from URL hostname.
+- `server_port`: Override server port for dialing.
+- `token`: ==Required== Authentication token for the remote instance.
+- `reverse`: Enable reverse proxy mode. When `url` is set with `reverse`, acts as a connector that dials out to the remote instance. When `url` is empty, acts as a receiver waiting for inbound reverse connections.
+- `detour`: Outbound tag for connecting to the remote instance.
+- `usages_path`: Optional usage tracking file.
+- `poll_interval`: How often to poll the remote status endpoint. Default `30m`.
+
 #### usages_path
 
 Path to the file for storing aggregated API usage statistics.
@@ -133,6 +170,8 @@ Statistics are organized by model and optionally by user when authentication is 
 
 The statistics file is automatically saved every minute and upon service shutdown.
 
+!!! question "Since sing-box 1.14.0"
+
 Conflict with `credentials`. In multi-credential mode, use `usages_path` on individual default credentials.
 
 #### users
@@ -147,7 +186,9 @@ Object format:
 {
   "name": "",
   "token": "",
-  "credential": ""
+  "credential": "",
+  "external_credential": "",
+  "allow_external_usage": false
 }
 ```
 
@@ -155,7 +196,12 @@ Object fields:
 
 - `name`: Username identifier for tracking purposes.
 - `token`: Bearer token for authentication. Clients authenticate by setting the `Authorization: Bearer <token>` header.
+
+!!! question "Since sing-box 1.14.0"
+
 - `credential`: Credential tag to use for this user. ==Required== when `credentials` is set.
+- `external_credential`: Tag of an external credential dedicated to serving this user. Response rate-limit headers are rewritten with aggregated utilization from all other credentials available to this user.
+- `allow_external_usage`: Allow this user to use external credentials. `false` by default.
 
 #### headers
 
@@ -166,6 +212,8 @@ These headers will override any existing headers with the same name.
 #### detour
 
 Outbound tag for connecting to the OpenAI API.
+
+!!! question "Since sing-box 1.14.0"
 
 Conflict with `credentials`. In multi-credential mode, use `detour` on individual default credentials.
 
