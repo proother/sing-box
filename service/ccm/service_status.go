@@ -100,12 +100,7 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		totalWeight
 }
 
-func (s *Service) rewriteResponseHeadersForExternalUser(headers http.Header, userConfig *option.CCMUser) {
-	provider, err := credentialForUser(s.userConfigMap, s.providers, userConfig.Name)
-	if err != nil {
-		return
-	}
-
+func (s *Service) rewriteResponseHeadersForExternalUser(headers http.Header, provider credentialProvider, userConfig *option.CCMUser) {
 	avgFiveHour, avgWeekly, totalWeight := s.computeAggregatedUtilization(provider, userConfig)
 
 	headers.Set("anthropic-ratelimit-unified-5h-utilization", strconv.FormatFloat(avgFiveHour/100, 'f', 6, 64))

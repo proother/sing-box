@@ -44,8 +44,7 @@ type defaultCredential struct {
 	watcherRetryAt     time.Time
 
 	// Connection interruption
-	onBecameUnusable func()
-	interrupted      bool
+	interrupted    bool
 	requestContext   context.Context
 	cancelRequests   context.CancelFunc
 	requestAccess    sync.Mutex
@@ -353,9 +352,6 @@ func (c *defaultCredential) interruptConnections() {
 	c.cancelRequests()
 	c.requestContext, c.cancelRequests = context.WithCancel(context.Background())
 	c.requestAccess.Unlock()
-	if c.onBecameUnusable != nil {
-		c.onBecameUnusable()
-	}
 }
 
 func (c *defaultCredential) wrapRequestContext(parent context.Context) *credentialRequestContext {

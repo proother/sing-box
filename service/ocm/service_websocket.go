@@ -253,7 +253,7 @@ func (s *Service) handleWebSocket(
 		}
 	}
 	if userConfig != nil && userConfig.ExternalCredential != "" {
-		s.rewriteResponseHeadersForExternalUser(clientResponseHeaders, userConfig)
+		s.rewriteResponseHeadersForExternalUser(clientResponseHeaders, provider, userConfig)
 	}
 
 	clientUpgrader := ws.HTTPUpgrader{

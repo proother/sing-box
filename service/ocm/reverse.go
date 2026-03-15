@@ -17,14 +17,14 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
-func reverseYamuxConfig() *yamux.Config {
+var defaultYamuxConfig = func() *yamux.Config {
 	config := yamux.DefaultConfig()
 	config.KeepAliveInterval = 15 * time.Second
 	config.ConnectionWriteTimeout = 10 * time.Second
 	config.MaxStreamWindowSize = 512 * 1024
 	config.LogOutput = io.Discard
 	return config
-}
+}()
 
 type bufferedConn struct {
 	reader *bufio.Reader
@@ -108,7 +108,7 @@ func (s *Service) handleReverseConnect(ctx context.Context, w http.ResponseWrite
 		return
 	}
 
-	session, err := yamux.Client(conn, reverseYamuxConfig())
+	session, err := yamux.Client(conn, defaultYamuxConfig)
 	if err != nil {
 		conn.Close()
 		s.logger.ErrorContext(ctx, "reverse connect: create yamux client for ", receiverCredential.tagName(), ": ", err)
@@ -161,9 +161,11 @@ func (c *externalCredential) connectorLoop() {
 		consecutiveFailures++
 		backoff := connectorBackoff(consecutiveFailures)
 		c.logger.Warn("reverse connection for ", c.tag, " lost: ", err, ", reconnecting in ", backoff)
+		timer := time.NewTimer(backoff)
 		select {
-		case <-time.After(backoff):
+		case <-timer.C:
 		case <-ctx.Done():
+			timer.Stop()
 			return
 		}
 	}
@@ -236,7 +238,7 @@ func (c *externalCredential) connectorConnect(ctx context.Context) (time.Duratio
 		}
 	}
 
-	session, err := yamux.Server(&bufferedConn{reader: reader, Conn: conn}, reverseYamuxConfig())
+	session, err := yamux.Server(&bufferedConn{reader: reader, Conn: conn}, defaultYamuxConfig)
 	if err != nil {
 		conn.Close()
 		return 0, E.Cause(err, "create yamux server")

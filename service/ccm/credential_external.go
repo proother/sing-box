@@ -40,8 +40,7 @@ type externalCredential struct {
 	usageTracker      *AggregatedUsage
 	logger            log.ContextLogger
 
-	onBecameUnusable func()
-	interrupted      bool
+	interrupted    bool
 	requestContext   context.Context
 	cancelRequests   context.CancelFunc
 	requestAccess    sync.Mutex
@@ -494,9 +493,6 @@ func (c *externalCredential) interruptConnections() {
 	c.cancelRequests()
 	c.requestContext, c.cancelRequests = context.WithCancel(context.Background())
 	c.requestAccess.Unlock()
-	if c.onBecameUnusable != nil {
-		c.onBecameUnusable()
-	}
 }
 
 func (c *externalCredential) doPollUsageRequest(ctx context.Context) (*http.Response, error) {

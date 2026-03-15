@@ -29,10 +29,12 @@ func doHTTPWithRetry(ctx context.Context, client *http.Client, buildRequest func
 	for attempt := range httpRetryMaxAttempts {
 		if attempt > 0 {
 			delay := httpRetryInitialDelay * time.Duration(1<<(attempt-1))
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return nil, lastError
-			case <-time.After(delay):
+			case <-timer.C:
 			}
 		}
 		request, err := buildRequest()

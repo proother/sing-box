@@ -100,12 +100,7 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		totalWeight
 }
 
-func (s *Service) rewriteResponseHeadersForExternalUser(headers http.Header, userConfig *option.OCMUser) {
-	provider, err := credentialForUser(s.userConfigMap, s.providers, userConfig.Name)
-	if err != nil {
-		return
-	}
-
+func (s *Service) rewriteResponseHeadersForExternalUser(headers http.Header, provider credentialProvider, userConfig *option.OCMUser) {
 	avgFiveHour, avgWeekly, totalWeight := s.computeAggregatedUtilization(provider, userConfig)
 
 	activeLimitIdentifier := normalizeRateLimitIdentifier(headers.Get("x-codex-active-limit"))

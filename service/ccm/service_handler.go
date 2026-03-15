@@ -313,7 +313,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Rewrite response headers for external users
 	if userConfig != nil && userConfig.ExternalCredential != "" {
-		s.rewriteResponseHeadersForExternalUser(response.Header, userConfig)
+		s.rewriteResponseHeadersForExternalUser(response.Header, provider, userConfig)
 	}
 
 	for key, values := range response.Header {
