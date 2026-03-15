@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"sync"
+
 
 	"github.com/sagernet/sing-box/adapter"
 	boxService "github.com/sagernet/sing-box/adapter/service"
@@ -157,9 +157,7 @@ type Service struct {
 	listener      *listener.Listener
 	tlsConfig     tls.ServerConfig
 	httpServer    *http.Server
-	userManager   *UserManager
-	trackingGroup sync.WaitGroup
-	shuttingDown  bool
+	userManager *UserManager
 
 	providers      map[string]credentialProvider
 	allCredentials []Credential

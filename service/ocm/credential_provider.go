@@ -375,6 +375,14 @@ func (p *balancerProvider) pollIfStale(ctx context.Context) {
 	}
 	p.sessionAccess.Unlock()
 
+	p.interruptAccess.Lock()
+	for key, entry := range p.credentialInterrupts {
+		if entry.context.Err() != nil {
+			delete(p.credentialInterrupts, key)
+		}
+	}
+	p.interruptAccess.Unlock()
+
 	for _, credential := range p.credentials {
 		if time.Since(credential.lastUpdatedTime()) > credential.pollBackoff(p.pollInterval) {
 			credential.pollUsage(ctx)

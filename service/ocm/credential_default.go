@@ -587,12 +587,7 @@ func (c *defaultCredential) pollUsage(ctx context.Context) {
 		return
 	}
 
-	var usageURL string
-	if c.isAPIKeyMode() {
-		usageURL = openaiAPIBaseURL + "/api/codex/usage"
-	} else {
-		usageURL = strings.TrimSuffix(chatGPTBackendURL, "/codex") + "/wham/usage"
-	}
+	usageURL := strings.TrimSuffix(chatGPTBackendURL, "/codex") + "/wham/usage"
 
 	accountID := c.getAccountID()
 	pollClient := &http.Client{

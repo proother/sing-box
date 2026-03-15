@@ -1148,7 +1148,7 @@ func (u *AggregatedUsage) AddUsageWithCycleHint(model string, contextWindow int,
 
 	addUsageToCombinations(&u.Combinations, model, normalizedServiceTier, contextWindow, weekStartUnix, user, inputTokens, outputTokens, cachedTokens)
 
-	go u.scheduleSave()
+	u.scheduleSave()
 
 	return nil
 }

@@ -642,8 +642,9 @@ func (c *defaultCredential) fetchProfile(ctx context.Context, httpClient *http.C
 	if rateLimitTier != "" {
 		c.state.rateLimitTier = rateLimitTier
 	}
+	resolvedAccountType := c.state.accountType
 	c.stateAccess.Unlock()
-	c.logger.Info("fetched profile for ", c.tag, ": type=", c.state.accountType, ", tier=", rateLimitTier, ", weight=", ccmPlanWeight(c.state.accountType, rateLimitTier))
+	c.logger.Info("fetched profile for ", c.tag, ": type=", resolvedAccountType, ", tier=", rateLimitTier, ", weight=", ccmPlanWeight(resolvedAccountType, rateLimitTier))
 }
 
 func (c *defaultCredential) close() {
