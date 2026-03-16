@@ -130,63 +130,82 @@ func newBalancerProvider(credentials []Credential, strategy string, pollInterval
 }
 
 func (p *balancerProvider) selectCredential(sessionID string, selection credentialSelection) (Credential, bool, error) {
-	if p.strategy == C.BalancerStrategyFallback {
+	selectionScope := selection.scopeOrDefault()
+	for {
+		if p.strategy == C.BalancerStrategyFallback {
+			best := p.pickCredential(selection.filter)
+			if best == nil {
+				return nil, false, allCredentialsUnavailableError(p.credentials)
+			}
+			return best, p.storeSessionIfAbsent(sessionID, sessionEntry{createdAt: time.Now()}), nil
+		}
+
+		if sessionID != "" {
+			p.sessionAccess.RLock()
+			entry, exists := p.sessions[sessionID]
+			p.sessionAccess.RUnlock()
+			if exists {
+				if entry.selectionScope == selectionScope {
+					for _, credential := range p.credentials {
+						if credential.tagName() == entry.tag && selection.allows(credential) && credential.isUsable() {
+							if p.rebalanceThreshold > 0 && (p.strategy == "" || p.strategy == C.BalancerStrategyLeastUsed) {
+								better := p.pickLeastUsed(selection.filter)
+								if better != nil && better.tagName() != credential.tagName() {
+									effectiveThreshold := p.rebalanceThreshold / credential.planWeight()
+									delta := credential.weeklyUtilization() - better.weeklyUtilization()
+									if delta > effectiveThreshold {
+										p.logger.Info("rebalancing away from ", credential.tagName(),
+											": utilization delta ", delta, "% exceeds effective threshold ",
+											effectiveThreshold, "% (weight ", credential.planWeight(), ")")
+										p.rebalanceCredential(credential.tagName(), selectionScope)
+										break
+									}
+								}
+							}
+							return credential, false, nil
+						}
+					}
+				}
+				p.sessionAccess.Lock()
+				currentEntry, stillExists := p.sessions[sessionID]
+				if stillExists && currentEntry == entry {
+					delete(p.sessions, sessionID)
+					p.sessionAccess.Unlock()
+				} else {
+					p.sessionAccess.Unlock()
+					continue
+				}
+			}
+		}
+
 		best := p.pickCredential(selection.filter)
 		if best == nil {
 			return nil, false, allCredentialsUnavailableError(p.credentials)
 		}
-		return best, false, nil
-	}
-
-	selectionScope := selection.scopeOrDefault()
-	if sessionID != "" {
-		p.sessionAccess.RLock()
-		entry, exists := p.sessions[sessionID]
-		p.sessionAccess.RUnlock()
-		if exists {
-			if entry.selectionScope == selectionScope {
-				for _, credential := range p.credentials {
-					if credential.tagName() == entry.tag && selection.allows(credential) && credential.isUsable() {
-						if p.rebalanceThreshold > 0 && (p.strategy == "" || p.strategy == C.BalancerStrategyLeastUsed) {
-							better := p.pickLeastUsed(selection.filter)
-							if better != nil && better.tagName() != credential.tagName() {
-								effectiveThreshold := p.rebalanceThreshold / credential.planWeight()
-								delta := credential.weeklyUtilization() - better.weeklyUtilization()
-								if delta > effectiveThreshold {
-									p.logger.Info("rebalancing away from ", credential.tagName(),
-										": utilization delta ", delta, "% exceeds effective threshold ",
-										effectiveThreshold, "% (weight ", credential.planWeight(), ")")
-									p.rebalanceCredential(credential.tagName(), selectionScope)
-									break
-								}
-							}
-						}
-						return credential, false, nil
-					}
-				}
-			}
-			p.sessionAccess.Lock()
-			delete(p.sessions, sessionID)
-			p.sessionAccess.Unlock()
-		}
-	}
-
-	best := p.pickCredential(selection.filter)
-	if best == nil {
-		return nil, false, allCredentialsUnavailableError(p.credentials)
-	}
-
-	isNew := sessionID != ""
-	if isNew {
-		p.sessionAccess.Lock()
-		p.sessions[sessionID] = sessionEntry{
+		if p.storeSessionIfAbsent(sessionID, sessionEntry{
 			tag:            best.tagName(),
 			selectionScope: selectionScope,
 			createdAt:      time.Now(),
+		}) {
+			return best, true, nil
 		}
-		p.sessionAccess.Unlock()
+		if sessionID == "" {
+			return best, false, nil
+		}
 	}
-	return best, isNew, nil
+}
+
+func (p *balancerProvider) storeSessionIfAbsent(sessionID string, entry sessionEntry) bool {
+	if sessionID == "" {
+		return false
+	}
+	p.sessionAccess.Lock()
+	defer p.sessionAccess.Unlock()
+	if _, exists := p.sessions[sessionID]; exists {
+		return false
+	}
+	p.sessions[sessionID] = entry
+	return true
 }
 
 func (p *balancerProvider) rebalanceCredential(tag string, selectionScope credentialSelectionScope) {

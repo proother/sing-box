@@ -325,9 +325,11 @@ func (s *Service) proxyWebSocketClientToUpstream(ctx context.Context, clientConn
 				Type        string `json:"type"`
 				Model       string `json:"model"`
 				ServiceTier string `json:"service_tier"`
+				Generate    *bool  `json:"generate"`
 			}
 			if json.Unmarshal(data, &request) == nil && request.Type == "response.create" && request.Model != "" {
-				if isNew && !logged {
+				isWarmup := request.Generate != nil && !*request.Generate
+				if !isWarmup && isNew && !logged {
 					logged = true
 					logParts := []any{"assigned credential ", selectedCredential.tagName()}
 					if sessionID != "" {
@@ -342,7 +344,7 @@ func (s *Service) proxyWebSocketClientToUpstream(ctx context.Context, clientConn
 					}
 					s.logger.DebugContext(ctx, logParts...)
 				}
-				if selectedCredential.usageTrackerOrNil() != nil {
+				if !isWarmup && selectedCredential.usageTrackerOrNil() != nil {
 					select {
 					case modelChannel <- request.Model:
 					default:
