@@ -637,6 +637,26 @@ func (c *externalCredential) pollUsage(ctx context.Context) {
 		return
 	}
 
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		c.logger.Debug("poll usage for ", c.tag, ": read body: ", err)
+		c.clearPollFailures()
+		return
+	}
+	var rawFields map[string]json.RawMessage
+	err = json.Unmarshal(body, &rawFields)
+	if err != nil {
+		c.logger.Debug("poll usage for ", c.tag, ": decode: ", err)
+		c.clearPollFailures()
+		return
+	}
+	if rawFields["five_hour_utilization"] == nil || rawFields["five_hour_reset"] == nil ||
+		rawFields["weekly_utilization"] == nil || rawFields["weekly_reset"] == nil ||
+		rawFields["plan_weight"] == nil {
+		c.logger.Error("poll usage for ", c.tag, ": invalid response")
+		c.clearPollFailures()
+		return
+	}
 	var statusResponse struct {
 		FiveHourUtilization float64 `json:"five_hour_utilization"`
 		FiveHourReset       int64   `json:"five_hour_reset"`
@@ -644,7 +664,7 @@ func (c *externalCredential) pollUsage(ctx context.Context) {
 		WeeklyReset         int64   `json:"weekly_reset"`
 		PlanWeight          float64 `json:"plan_weight"`
 	}
-	err = json.NewDecoder(response.Body).Decode(&statusResponse)
+	err = json.Unmarshal(body, &statusResponse)
 	if err != nil {
 		c.logger.Debug("poll usage for ", c.tag, ": decode: ", err)
 		c.clearPollFailures()
@@ -730,11 +750,29 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 
 	decoder := json.NewDecoder(response.Body)
 	for {
-		var statusResponse statusPayload
-		err = decoder.Decode(&statusResponse)
+		var rawMessage json.RawMessage
+		err = decoder.Decode(&rawMessage)
 		if err != nil {
 			result.duration = time.Since(startTime)
 			return result, err
+		}
+		var rawFields map[string]json.RawMessage
+		err = json.Unmarshal(rawMessage, &rawFields)
+		if err != nil {
+			result.duration = time.Since(startTime)
+			return result, E.Cause(err, "decode status frame")
+		}
+		if rawFields["five_hour_utilization"] == nil || rawFields["five_hour_reset"] == nil ||
+			rawFields["weekly_utilization"] == nil || rawFields["weekly_reset"] == nil ||
+			rawFields["plan_weight"] == nil {
+			result.duration = time.Since(startTime)
+			return result, E.New("invalid response")
+		}
+		var statusResponse statusPayload
+		err = json.Unmarshal(rawMessage, &statusResponse)
+		if err != nil {
+			result.duration = time.Since(startTime)
+			return result, E.Cause(err, "decode status frame")
 		}
 
 		c.stateAccess.Lock()
