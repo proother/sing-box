@@ -5,6 +5,7 @@ import (
 	"context"
 	stdTLS "crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -677,6 +678,10 @@ func (c *externalCredential) statusStreamLoop() {
 		if ctx.Err() != nil {
 			return
 		}
+		if !shouldRetryStatusStreamError(err) {
+			c.logger.Warn("status stream for ", c.tag, " disconnected: ", err, ", not retrying")
+			return
+		}
 		var backoff time.Duration
 		consecutiveFailures, backoff = c.nextStatusStreamBackoff(result, consecutiveFailures)
 		c.logger.Debug("status stream for ", c.tag, " disconnected: ", err, ", reconnecting in ", backoff)
@@ -758,6 +763,10 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 		c.markUsageStreamUpdated()
 		c.emitStatusUpdate()
 	}
+}
+
+func shouldRetryStatusStreamError(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF) || E.IsClosedOrCanceled(err)
 }
 
 func (c *externalCredential) nextStatusStreamBackoff(result statusStreamResult, consecutiveFailures int) (int, time.Duration) {
