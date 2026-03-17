@@ -239,23 +239,41 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 
 func (s *Service) rewriteResponseHeaders(headers http.Header, provider credentialProvider, userConfig *option.OCMUser) {
 	status := s.computeAggregatedUtilization(provider, userConfig)
-	activeLimitIdentifier := normalizeRateLimitIdentifier(headers.Get("x-codex-active-limit"))
-	if activeLimitIdentifier == "" {
-		activeLimitIdentifier = "codex"
-	}
-	headers.Set("x-"+activeLimitIdentifier+"-primary-used-percent", strconv.FormatFloat(status.fiveHourUtilization, 'f', 2, 64))
-	headers.Set("x-"+activeLimitIdentifier+"-secondary-used-percent", strconv.FormatFloat(status.weeklyUtilization, 'f', 2, 64))
+	headers.Set("x-codex-primary-used-percent", strconv.FormatFloat(status.fiveHourUtilization, 'f', 2, 64))
+	headers.Set("x-codex-secondary-used-percent", strconv.FormatFloat(status.weeklyUtilization, 'f', 2, 64))
 	if !status.fiveHourReset.IsZero() {
-		headers.Set("x-"+activeLimitIdentifier+"-primary-reset-at", strconv.FormatInt(status.fiveHourReset.Unix(), 10))
+		headers.Set("x-codex-primary-reset-at", strconv.FormatInt(status.fiveHourReset.Unix(), 10))
 	} else {
-		headers.Del("x-" + activeLimitIdentifier + "-primary-reset-at")
+		headers.Del("x-codex-primary-reset-at")
 	}
 	if !status.weeklyReset.IsZero() {
-		headers.Set("x-"+activeLimitIdentifier+"-secondary-reset-at", strconv.FormatInt(status.weeklyReset.Unix(), 10))
+		headers.Set("x-codex-secondary-reset-at", strconv.FormatInt(status.weeklyReset.Unix(), 10))
 	} else {
-		headers.Del("x-" + activeLimitIdentifier + "-secondary-reset-at")
+		headers.Del("x-codex-secondary-reset-at")
 	}
 	if status.totalWeight > 0 {
 		headers.Set("X-OCM-Plan-Weight", strconv.FormatFloat(status.totalWeight, 'f', -1, 64))
+	}
+	rateLimitSuffixes := [...]string{
+		"-primary-used-percent",
+		"-primary-reset-at",
+		"-secondary-used-percent",
+		"-secondary-reset-at",
+		"-secondary-window-minutes",
+		"-limit-name",
+	}
+	for key := range headers {
+		lowerKey := strings.ToLower(key)
+		if !strings.HasPrefix(lowerKey, "x-") {
+			continue
+		}
+		for _, suffix := range rateLimitSuffixes {
+			if strings.HasSuffix(lowerKey, suffix) {
+				if strings.TrimSuffix(lowerKey, suffix) != "x-codex" {
+					headers.Del(key)
+				}
+				break
+			}
+		}
 	}
 }
