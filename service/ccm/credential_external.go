@@ -632,6 +632,7 @@ func (c *externalCredential) pollUsage() {
 	}
 
 	c.stateAccess.Lock()
+	isFirstUpdate := c.state.lastUpdated.IsZero()
 	oldFiveHour := c.state.fiveHourUtilization
 	oldWeekly := c.state.weeklyUtilization
 	c.state.consecutivePollFailures = 0
@@ -649,7 +650,7 @@ func (c *externalCredential) pollUsage() {
 	if c.state.hardRateLimited && time.Now().After(c.state.rateLimitResetAt) {
 		c.state.hardRateLimited = false
 	}
-	if int(c.state.fiveHourUtilization*100) != int(oldFiveHour*100) || int(c.state.weeklyUtilization*100) != int(oldWeekly*100) {
+	if isFirstUpdate || int(c.state.fiveHourUtilization*100) != int(oldFiveHour*100) || int(c.state.weeklyUtilization*100) != int(oldWeekly*100) {
 		resetSuffix := ""
 		if !c.state.weeklyReset.IsZero() {
 			resetSuffix = ", resets=" + log.FormatDuration(time.Until(c.state.weeklyReset))
@@ -739,6 +740,7 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 		}
 
 		c.stateAccess.Lock()
+		isFirstUpdate := c.state.lastUpdated.IsZero()
 		oldFiveHour := c.state.fiveHourUtilization
 		oldWeekly := c.state.weeklyUtilization
 		c.state.consecutivePollFailures = 0
@@ -756,7 +758,7 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 		if c.state.hardRateLimited && time.Now().After(c.state.rateLimitResetAt) {
 			c.state.hardRateLimited = false
 		}
-		if int(c.state.fiveHourUtilization*100) != int(oldFiveHour*100) || int(c.state.weeklyUtilization*100) != int(oldWeekly*100) {
+		if isFirstUpdate || int(c.state.fiveHourUtilization*100) != int(oldFiveHour*100) || int(c.state.weeklyUtilization*100) != int(oldWeekly*100) {
 			resetSuffix := ""
 			if !c.state.weeklyReset.IsZero() {
 				resetSuffix = ", resets=" + log.FormatDuration(time.Until(c.state.weeklyReset))
