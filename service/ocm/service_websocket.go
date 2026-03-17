@@ -252,9 +252,7 @@ func (s *Service) handleWebSocket(
 			clientResponseHeaders[key] = append([]string(nil), values...)
 		}
 	}
-	if userConfig != nil && userConfig.ExternalCredential != "" {
-		s.rewriteResponseHeadersForExternalUser(clientResponseHeaders, provider, userConfig)
-	}
+	s.rewriteResponseHeaders(clientResponseHeaders, provider, userConfig)
 
 	clientUpgrader := ws.HTTPUpgrader{
 		Header: clientResponseHeaders,
@@ -292,10 +290,16 @@ func (s *Service) handleWebSocket(
 		upstreamReadWriter = upstreamConn
 	}
 
+	rateLimitIdentifier := normalizeRateLimitIdentifier(upstreamResponseHeaders.Get("x-codex-active-limit"))
+	if rateLimitIdentifier == "" {
+		rateLimitIdentifier = "codex"
+	}
+
+	var clientWriteAccess sync.Mutex
 	modelChannel := make(chan string, 1)
 	var waitGroup sync.WaitGroup
 
-	waitGroup.Add(2)
+	waitGroup.Add(3)
 	go func() {
 		defer waitGroup.Done()
 		defer session.Close()
@@ -304,7 +308,12 @@ func (s *Service) handleWebSocket(
 	go func() {
 		defer waitGroup.Done()
 		defer session.Close()
-		s.proxyWebSocketUpstreamToClient(ctx, upstreamReadWriter, clientConn, selectedCredential, userConfig, provider, modelChannel, username, weeklyCycleHint)
+		s.proxyWebSocketUpstreamToClient(ctx, upstreamReadWriter, clientConn, &clientWriteAccess, selectedCredential, userConfig, provider, modelChannel, username, weeklyCycleHint)
+	}()
+	go func() {
+		defer waitGroup.Done()
+		defer session.Close()
+		s.pushWebSocketAggregatedStatus(ctx, clientConn, &clientWriteAccess, provider, userConfig, rateLimitIdentifier)
 	}()
 	waitGroup.Wait()
 }
@@ -363,7 +372,7 @@ func (s *Service) proxyWebSocketClientToUpstream(ctx context.Context, clientConn
 	}
 }
 
-func (s *Service) proxyWebSocketUpstreamToClient(ctx context.Context, upstreamReadWriter io.ReadWriter, clientConn net.Conn, selectedCredential Credential, userConfig *option.OCMUser, provider credentialProvider, modelChannel <-chan string, username string, weeklyCycleHint *WeeklyCycleHint) {
+func (s *Service) proxyWebSocketUpstreamToClient(ctx context.Context, upstreamReadWriter io.ReadWriter, clientConn net.Conn, clientWriteAccess *sync.Mutex, selectedCredential Credential, userConfig *option.OCMUser, provider credentialProvider, modelChannel <-chan string, username string, weeklyCycleHint *WeeklyCycleHint) {
 	usageTracker := selectedCredential.usageTrackerOrNil()
 	var requestModel string
 	for {
@@ -384,11 +393,9 @@ func (s *Service) proxyWebSocketUpstreamToClient(ctx context.Context, upstreamRe
 				switch event.Type {
 				case "codex.rate_limits":
 					s.handleWebSocketRateLimitsEvent(data, selectedCredential)
-					if userConfig != nil && userConfig.ExternalCredential != "" {
-						rewritten, rewriteErr := s.rewriteWebSocketRateLimitsForExternalUser(data, provider, userConfig)
-						if rewriteErr == nil {
-							data = rewritten
-						}
+					rewritten, rewriteErr := s.rewriteWebSocketRateLimits(data, provider, userConfig)
+					if rewriteErr == nil {
+						data = rewritten
 					}
 				case "error":
 					if event.StatusCode == http.StatusTooManyRequests {
@@ -407,7 +414,9 @@ func (s *Service) proxyWebSocketUpstreamToClient(ctx context.Context, upstreamRe
 			}
 		}
 
+		clientWriteAccess.Lock()
 		err = wsutil.WriteServerMessage(clientConn, opCode, data)
+		clientWriteAccess.Unlock()
 		if err != nil {
 			if !E.IsClosedOrCanceled(err) {
 				s.logger.DebugContext(ctx, "write client websocket: ", err)
@@ -483,7 +492,7 @@ func (s *Service) handleWebSocketErrorRateLimited(data []byte, selectedCredentia
 	selectedCredential.markRateLimited(resetAt)
 }
 
-func (s *Service) rewriteWebSocketRateLimitsForExternalUser(data []byte, provider credentialProvider, userConfig *option.OCMUser) ([]byte, error) {
+func (s *Service) rewriteWebSocketRateLimits(data []byte, provider credentialProvider, userConfig *option.OCMUser) ([]byte, error) {
 	var event map[string]json.RawMessage
 	err := json.Unmarshal(data, &event)
 	if err != nil {
@@ -501,13 +510,13 @@ func (s *Service) rewriteWebSocketRateLimitsForExternalUser(data []byte, provide
 		return nil, err
 	}
 
-	averageFiveHour, averageWeekly, totalWeight := s.computeAggregatedUtilization(provider, userConfig)
+	status := s.computeAggregatedUtilization(provider, userConfig)
 
-	if totalWeight > 0 {
-		event["plan_weight"], _ = json.Marshal(totalWeight)
+	if status.totalWeight > 0 {
+		event["plan_weight"], _ = json.Marshal(status.totalWeight)
 	}
 
-	primaryData, err := rewriteWebSocketRateLimitWindow(rateLimits["primary"], averageFiveHour)
+	primaryData, err := rewriteWebSocketRateLimitWindow(rateLimits["primary"], status.fiveHourUtilization, resetToEpoch(status.fiveHourReset))
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +524,7 @@ func (s *Service) rewriteWebSocketRateLimitsForExternalUser(data []byte, provide
 		rateLimits["primary"] = primaryData
 	}
 
-	secondaryData, err := rewriteWebSocketRateLimitWindow(rateLimits["secondary"], averageWeekly)
+	secondaryData, err := rewriteWebSocketRateLimitWindow(rateLimits["secondary"], status.weeklyUtilization, resetToEpoch(status.weeklyReset))
 	if err != nil {
 		return nil, err
 	}
@@ -531,7 +540,7 @@ func (s *Service) rewriteWebSocketRateLimitsForExternalUser(data []byte, provide
 	return json.Marshal(event)
 }
 
-func rewriteWebSocketRateLimitWindow(data json.RawMessage, usedPercent float64) (json.RawMessage, error) {
+func rewriteWebSocketRateLimitWindow(data json.RawMessage, usedPercent float64, resetAt int64) (json.RawMessage, error) {
 	if len(data) == 0 || string(data) == "null" {
 		return nil, nil
 	}
@@ -547,7 +556,91 @@ func rewriteWebSocketRateLimitWindow(data json.RawMessage, usedPercent float64) 
 		return nil, err
 	}
 
+	if resetAt > 0 {
+		window["reset_at"], err = json.Marshal(resetAt)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return json.Marshal(window)
+}
+
+func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn net.Conn, clientWriteAccess *sync.Mutex, provider credentialProvider, userConfig *option.OCMUser, rateLimitIdentifier string) {
+	subscription, done, err := s.statusObserver.Subscribe()
+	if err != nil {
+		return
+	}
+	defer s.statusObserver.UnSubscribe(subscription)
+
+	last := s.computeAggregatedUtilization(provider, userConfig)
+	data := buildSyntheticRateLimitsEvent(rateLimitIdentifier, last)
+	clientWriteAccess.Lock()
+	err = wsutil.WriteServerMessage(clientConn, ws.OpText, data)
+	clientWriteAccess.Unlock()
+	if err != nil {
+		return
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case <-subscription:
+			for {
+				select {
+				case <-subscription:
+				default:
+					goto drained
+				}
+			}
+		drained:
+			current := s.computeAggregatedUtilization(provider, userConfig)
+			if current.equal(last) {
+				continue
+			}
+			last = current
+			data = buildSyntheticRateLimitsEvent(rateLimitIdentifier, current)
+			clientWriteAccess.Lock()
+			err = wsutil.WriteServerMessage(clientConn, ws.OpText, data)
+			clientWriteAccess.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}
+}
+
+func buildSyntheticRateLimitsEvent(identifier string, status aggregatedStatus) []byte {
+	type rateLimitWindow struct {
+		UsedPercent float64 `json:"used_percent"`
+		ResetAt     int64   `json:"reset_at,omitempty"`
+	}
+	event := struct {
+		Type       string `json:"type"`
+		RateLimits struct {
+			Primary   *rateLimitWindow `json:"primary,omitempty"`
+			Secondary *rateLimitWindow `json:"secondary,omitempty"`
+		} `json:"rate_limits"`
+		LimitName  string  `json:"limit_name"`
+		PlanWeight float64 `json:"plan_weight,omitempty"`
+	}{
+		Type:       "codex.rate_limits",
+		LimitName:  identifier,
+		PlanWeight: status.totalWeight,
+	}
+	event.RateLimits.Primary = &rateLimitWindow{
+		UsedPercent: status.fiveHourUtilization,
+		ResetAt:     resetToEpoch(status.fiveHourReset),
+	}
+	event.RateLimits.Secondary = &rateLimitWindow{
+		UsedPercent: status.weeklyUtilization,
+		ResetAt:     resetToEpoch(status.weeklyReset),
+	}
+	data, _ := json.Marshal(event)
+	return data
 }
 
 func (s *Service) handleWebSocketResponseCompleted(data []byte, usageTracker *AggregatedUsage, requestModel string, username string, weeklyCycleHint *WeeklyCycleHint) {

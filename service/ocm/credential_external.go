@@ -28,10 +28,7 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
-const (
-	reverseProxyBaseURL = "http://reverse-proxy"
-	statusStreamHeader  = "X-OCM-Status-Stream"
-)
+const reverseProxyBaseURL = "http://reverse-proxy"
 
 type externalCredential struct {
 	tag               string
@@ -77,7 +74,6 @@ type reverseSessionDialer struct {
 type statusStreamResult struct {
 	duration time.Duration
 	frames   int
-	oneShot  bool
 }
 
 func (d reverseSessionDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -353,6 +349,12 @@ func (c *externalCredential) weeklyResetTime() time.Time {
 	c.stateAccess.RLock()
 	defer c.stateAccess.RUnlock()
 	return c.state.weeklyReset
+}
+
+func (c *externalCredential) fiveHourResetTime() time.Time {
+	c.stateAccess.RLock()
+	defer c.stateAccess.RUnlock()
+	return c.state.fiveHourReset
 }
 
 func (c *externalCredential) markRateLimited(resetAt time.Time) {
@@ -634,7 +636,9 @@ func (c *externalCredential) pollUsage(ctx context.Context) {
 
 	var statusResponse struct {
 		FiveHourUtilization float64 `json:"five_hour_utilization"`
+		FiveHourReset       int64   `json:"five_hour_reset"`
 		WeeklyUtilization   float64 `json:"weekly_utilization"`
+		WeeklyReset         int64   `json:"weekly_reset"`
 		PlanWeight          float64 `json:"plan_weight"`
 	}
 	err = json.NewDecoder(response.Body).Decode(&statusResponse)
@@ -651,6 +655,12 @@ func (c *externalCredential) pollUsage(ctx context.Context) {
 	c.state.consecutivePollFailures = 0
 	c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
 	c.state.weeklyUtilization = statusResponse.WeeklyUtilization
+	if statusResponse.FiveHourReset > 0 {
+		c.state.fiveHourReset = time.Unix(statusResponse.FiveHourReset, 0)
+	}
+	if statusResponse.WeeklyReset > 0 {
+		c.state.weeklyReset = time.Unix(statusResponse.WeeklyReset, 0)
+	}
 	if statusResponse.PlanWeight > 0 {
 		c.state.remotePlanWeight = statusResponse.PlanWeight
 	}
@@ -687,13 +697,8 @@ func (c *externalCredential) statusStreamLoop() {
 			return
 		}
 		var backoff time.Duration
-		var oneShot bool
-		consecutiveFailures, backoff, oneShot = c.nextStatusStreamBackoff(result, consecutiveFailures)
-		if oneShot {
-			c.logger.Debug("status stream for ", c.tag, " returned a single-frame response, retrying in ", backoff)
-		} else {
-			c.logger.Debug("status stream for ", c.tag, " disconnected: ", err, ", reconnecting in ", backoff)
-		}
+		consecutiveFailures, backoff = c.nextStatusStreamBackoff(result, consecutiveFailures)
+		c.logger.Debug("status stream for ", c.tag, " disconnected: ", err, ", reconnecting in ", backoff)
 		timer := time.NewTimer(backoff)
 		select {
 		case <-timer.C:
@@ -721,18 +726,11 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 	}
 
 	decoder := json.NewDecoder(response.Body)
-	isStatusStream := response.Header.Get(statusStreamHeader) == "true"
-	previousLastUpdated := c.lastUpdatedTime()
-	var firstFrameUpdatedAt time.Time
 	for {
 		var statusResponse statusPayload
 		err = decoder.Decode(&statusResponse)
 		if err != nil {
 			result.duration = time.Since(startTime)
-			if result.frames == 1 && err == io.EOF && !isStatusStream {
-				result.oneShot = true
-				c.restoreLastUpdatedIfUnchanged(firstFrameUpdatedAt, previousLastUpdated)
-			}
 			return result, err
 		}
 
@@ -740,6 +738,12 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 		c.state.consecutivePollFailures = 0
 		c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
 		c.state.weeklyUtilization = statusResponse.WeeklyUtilization
+		if statusResponse.FiveHourReset > 0 {
+			c.state.fiveHourReset = time.Unix(statusResponse.FiveHourReset, 0)
+		}
+		if statusResponse.WeeklyReset > 0 {
+			c.state.weeklyReset = time.Unix(statusResponse.WeeklyReset, 0)
+		}
 		if statusResponse.PlanWeight > 0 {
 			c.state.remotePlanWeight = statusResponse.PlanWeight
 		}
@@ -752,23 +756,17 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 			c.interruptConnections()
 		}
 		result.frames++
-		updatedAt := c.markUsageStreamUpdated()
-		if result.frames == 1 {
-			firstFrameUpdatedAt = updatedAt
-		}
+		c.markUsageStreamUpdated()
 		c.emitStatusUpdate()
 	}
 }
 
-func (c *externalCredential) nextStatusStreamBackoff(result statusStreamResult, consecutiveFailures int) (int, time.Duration, bool) {
-	if result.oneShot {
-		return 0, c.pollInterval, true
-	}
+func (c *externalCredential) nextStatusStreamBackoff(result statusStreamResult, consecutiveFailures int) (int, time.Duration) {
 	if result.duration >= connectorBackoffResetThreshold {
 		consecutiveFailures = 0
 	}
 	consecutiveFailures++
-	return consecutiveFailures, connectorBackoff(consecutiveFailures), false
+	return consecutiveFailures, connectorBackoff(consecutiveFailures)
 }
 
 func (c *externalCredential) doStreamStatusRequest(ctx context.Context) (*http.Response, error) {
@@ -809,23 +807,10 @@ func (c *externalCredential) lastUpdatedTime() time.Time {
 	return c.state.lastUpdated
 }
 
-func (c *externalCredential) markUsageStreamUpdated() time.Time {
+func (c *externalCredential) markUsageStreamUpdated() {
 	c.stateAccess.Lock()
 	defer c.stateAccess.Unlock()
-	now := time.Now()
-	c.state.lastUpdated = now
-	return now
-}
-
-func (c *externalCredential) restoreLastUpdatedIfUnchanged(expectedCurrent time.Time, previous time.Time) {
-	if expectedCurrent.IsZero() {
-		return
-	}
-	c.stateAccess.Lock()
-	defer c.stateAccess.Unlock()
-	if c.state.lastUpdated.Equal(expectedCurrent) {
-		c.state.lastUpdated = previous
-	}
+	c.state.lastUpdated = time.Now()
 }
 
 func (c *externalCredential) markUsagePollAttempted() {

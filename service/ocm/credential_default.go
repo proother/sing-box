@@ -476,6 +476,12 @@ func (c *defaultCredential) weeklyResetTime() time.Time {
 	return c.state.weeklyReset
 }
 
+func (c *defaultCredential) fiveHourResetTime() time.Time {
+	c.stateAccess.RLock()
+	defer c.stateAccess.RUnlock()
+	return c.state.fiveHourReset
+}
+
 func (c *defaultCredential) isAvailable() bool {
 	c.retryCredentialReloadIfNeeded()
 

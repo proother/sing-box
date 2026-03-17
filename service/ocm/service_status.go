@@ -6,14 +6,50 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sagernet/sing-box/option"
 )
 
 type statusPayload struct {
 	FiveHourUtilization float64 `json:"five_hour_utilization"`
+	FiveHourReset       int64   `json:"five_hour_reset"`
 	WeeklyUtilization   float64 `json:"weekly_utilization"`
+	WeeklyReset         int64   `json:"weekly_reset"`
 	PlanWeight          float64 `json:"plan_weight"`
+}
+
+type aggregatedStatus struct {
+	fiveHourUtilization float64
+	weeklyUtilization   float64
+	totalWeight         float64
+	fiveHourReset       time.Time
+	weeklyReset         time.Time
+}
+
+func resetToEpoch(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+func (s aggregatedStatus) equal(other aggregatedStatus) bool {
+	return s.fiveHourUtilization == other.fiveHourUtilization &&
+		s.weeklyUtilization == other.weeklyUtilization &&
+		s.totalWeight == other.totalWeight &&
+		resetToEpoch(s.fiveHourReset) == resetToEpoch(other.fiveHourReset) &&
+		resetToEpoch(s.weeklyReset) == resetToEpoch(other.weeklyReset)
+}
+
+func (s aggregatedStatus) toPayload() statusPayload {
+	return statusPayload{
+		FiveHourUtilization: s.fiveHourUtilization,
+		FiveHourReset:       resetToEpoch(s.fiveHourReset),
+		WeeklyUtilization:   s.weeklyUtilization,
+		WeeklyReset:         resetToEpoch(s.weeklyReset),
+		PlanWeight:          s.totalWeight,
+	}
 }
 
 func (s *Service) handleStatusEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -68,15 +104,11 @@ func (s *Service) handleStatusEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	provider.pollIfStale(r.Context())
-	avgFiveHour, avgWeekly, totalWeight := s.computeAggregatedUtilization(provider, userConfig)
+	status := s.computeAggregatedUtilization(provider, userConfig)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(statusPayload{
-		FiveHourUtilization: avgFiveHour,
-		WeeklyUtilization:   avgWeekly,
-		PlanWeight:          totalWeight,
-	})
+	json.NewEncoder(w).Encode(status.toPayload())
 }
 
 func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, provider credentialProvider, userConfig *option.OCMUser) {
@@ -96,16 +128,11 @@ func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, pro
 	provider.pollIfStale(r.Context())
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set(statusStreamHeader, "true")
 	w.WriteHeader(http.StatusOK)
 
-	lastFiveHour, lastWeekly, lastWeight := s.computeAggregatedUtilization(provider, userConfig)
+	last := s.computeAggregatedUtilization(provider, userConfig)
 	buf := &bytes.Buffer{}
-	json.NewEncoder(buf).Encode(statusPayload{
-		FiveHourUtilization: lastFiveHour,
-		WeeklyUtilization:   lastWeekly,
-		PlanWeight:          lastWeight,
-	})
+	json.NewEncoder(buf).Encode(last.toPayload())
 	_, writeErr := w.Write(buf.Bytes())
 	if writeErr != nil {
 		return
@@ -127,19 +154,13 @@ func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, pro
 				}
 			}
 		drained:
-			fiveHour, weekly, weight := s.computeAggregatedUtilization(provider, userConfig)
-			if fiveHour == lastFiveHour && weekly == lastWeekly && weight == lastWeight {
+			current := s.computeAggregatedUtilization(provider, userConfig)
+			if current.equal(last) {
 				continue
 			}
-			lastFiveHour = fiveHour
-			lastWeekly = weekly
-			lastWeight = weight
+			last = current
 			buf.Reset()
-			json.NewEncoder(buf).Encode(statusPayload{
-				FiveHourUtilization: fiveHour,
-				WeeklyUtilization:   weekly,
-				PlanWeight:          weight,
-			})
+			json.NewEncoder(buf).Encode(current.toPayload())
 			_, writeErr = w.Write(buf.Bytes())
 			if writeErr != nil {
 				return
@@ -149,8 +170,11 @@ func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, pro
 	}
 }
 
-func (s *Service) computeAggregatedUtilization(provider credentialProvider, userConfig *option.OCMUser) (float64, float64, float64) {
+func (s *Service) computeAggregatedUtilization(provider credentialProvider, userConfig *option.OCMUser) aggregatedStatus {
 	var totalWeightedRemaining5h, totalWeightedRemainingWeekly, totalWeight float64
+	now := time.Now()
+	var totalWeightedHoursUntil5hReset, total5hResetWeight float64
+	var totalWeightedHoursUntilWeeklyReset, totalWeeklyResetWeight float64
 	for _, credential := range provider.allCredentials() {
 		if !credential.isAvailable() {
 			continue
@@ -173,26 +197,63 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		totalWeightedRemaining5h += remaining5h * weight
 		totalWeightedRemainingWeekly += remainingWeekly * weight
 		totalWeight += weight
+
+		fiveHourReset := credential.fiveHourResetTime()
+		if !fiveHourReset.IsZero() {
+			hours := fiveHourReset.Sub(now).Hours()
+			if hours < 0 {
+				hours = 0
+			}
+			totalWeightedHoursUntil5hReset += hours * weight
+			total5hResetWeight += weight
+		}
+		weeklyReset := credential.weeklyResetTime()
+		if !weeklyReset.IsZero() {
+			hours := weeklyReset.Sub(now).Hours()
+			if hours < 0 {
+				hours = 0
+			}
+			totalWeightedHoursUntilWeeklyReset += hours * weight
+			totalWeeklyResetWeight += weight
+		}
 	}
 	if totalWeight == 0 {
-		return 100, 100, 0
+		return aggregatedStatus{
+			fiveHourUtilization: 100,
+			weeklyUtilization:   100,
+		}
 	}
-	return 100 - totalWeightedRemaining5h/totalWeight,
-		100 - totalWeightedRemainingWeekly/totalWeight,
-		totalWeight
+	result := aggregatedStatus{
+		fiveHourUtilization: 100 - totalWeightedRemaining5h/totalWeight,
+		weeklyUtilization:   100 - totalWeightedRemainingWeekly/totalWeight,
+		totalWeight:         totalWeight,
+	}
+	if total5hResetWeight > 0 {
+		avgHours := totalWeightedHoursUntil5hReset / total5hResetWeight
+		result.fiveHourReset = now.Add(time.Duration(avgHours * float64(time.Hour)))
+	}
+	if totalWeeklyResetWeight > 0 {
+		avgHours := totalWeightedHoursUntilWeeklyReset / totalWeeklyResetWeight
+		result.weeklyReset = now.Add(time.Duration(avgHours * float64(time.Hour)))
+	}
+	return result
 }
 
-func (s *Service) rewriteResponseHeadersForExternalUser(headers http.Header, provider credentialProvider, userConfig *option.OCMUser) {
-	avgFiveHour, avgWeekly, totalWeight := s.computeAggregatedUtilization(provider, userConfig)
-
+func (s *Service) rewriteResponseHeaders(headers http.Header, provider credentialProvider, userConfig *option.OCMUser) {
+	status := s.computeAggregatedUtilization(provider, userConfig)
 	activeLimitIdentifier := normalizeRateLimitIdentifier(headers.Get("x-codex-active-limit"))
 	if activeLimitIdentifier == "" {
 		activeLimitIdentifier = "codex"
 	}
-
-	headers.Set("x-"+activeLimitIdentifier+"-primary-used-percent", strconv.FormatFloat(avgFiveHour, 'f', 2, 64))
-	headers.Set("x-"+activeLimitIdentifier+"-secondary-used-percent", strconv.FormatFloat(avgWeekly, 'f', 2, 64))
-	if totalWeight > 0 {
-		headers.Set("X-OCM-Plan-Weight", strconv.FormatFloat(totalWeight, 'f', -1, 64))
+	headers.Set("x-"+activeLimitIdentifier+"-primary-used-percent", strconv.FormatFloat(status.fiveHourUtilization, 'f', 2, 64))
+	headers.Set("x-"+activeLimitIdentifier+"-secondary-used-percent", strconv.FormatFloat(status.weeklyUtilization, 'f', 2, 64))
+	if !status.fiveHourReset.IsZero() {
+		headers.Set("x-"+activeLimitIdentifier+"-primary-reset-at", strconv.FormatInt(status.fiveHourReset.Unix(), 10))
+	}
+	if !status.weeklyReset.IsZero() {
+		headers.Set("x-"+activeLimitIdentifier+"-secondary-reset-at", strconv.FormatInt(status.weeklyReset.Unix(), 10))
+	}
+	if status.totalWeight > 0 {
+		headers.Set("X-OCM-Plan-Weight", strconv.FormatFloat(status.totalWeight, 'f', -1, 64))
 	}
 }

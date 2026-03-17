@@ -107,6 +107,7 @@ type Credential interface {
 	weeklyCap() float64
 	planWeight() float64
 	weeklyResetTime() time.Time
+	fiveHourResetTime() time.Time
 	markRateLimited(resetAt time.Time)
 	earliestReset() time.Time
 	unavailableError() error

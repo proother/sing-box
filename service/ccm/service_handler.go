@@ -311,10 +311,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rewrite response headers for external users
-	if userConfig != nil && userConfig.ExternalCredential != "" {
-		s.rewriteResponseHeadersForExternalUser(response.Header, provider, userConfig)
-	}
+	s.rewriteResponseHeaders(response.Header, provider, userConfig)
 
 	for key, values := range response.Header {
 		if !isHopByHopHeader(key) && !isReverseProxyHeader(key) {

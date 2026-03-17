@@ -84,7 +84,7 @@ func newTestYamuxSessionPair(t *testing.T) (*yamux.Session, *yamux.Session) {
 	return clientSession, serverSession
 }
 
-func TestExternalCredentialConnectStatusStreamOneShotRestoresLastUpdated(t *testing.T) {
+func TestExternalCredentialConnectStatusStreamSingleFrameStreamReconnects(t *testing.T) {
 	credential, subscription := newTestOCMExternalCredential(t, "{\"five_hour_utilization\":12,\"weekly_utilization\":34,\"plan_weight\":2}\n", nil)
 	oldTime := time.Unix(123, 0)
 	credential.stateAccess.Lock()
@@ -94,50 +94,6 @@ func TestExternalCredentialConnectStatusStreamOneShotRestoresLastUpdated(t *test
 	result, err := credential.connectStatusStream(context.Background())
 	if err != io.EOF {
 		t.Fatalf("expected EOF, got %v", err)
-	}
-	if !result.oneShot {
-		t.Fatal("expected one-shot result")
-	}
-	if result.frames != 1 {
-		t.Fatalf("expected 1 frame, got %d", result.frames)
-	}
-	if !credential.lastUpdatedTime().Equal(oldTime) {
-		t.Fatalf("expected lastUpdated restored to %v, got %v", oldTime, credential.lastUpdatedTime())
-	}
-	if credential.fiveHourUtilization() != 12 || credential.weeklyUtilization() != 34 {
-		t.Fatalf("unexpected utilizations: 5h=%v weekly=%v", credential.fiveHourUtilization(), credential.weeklyUtilization())
-	}
-	if count := drainStatusEvents(subscription); count != 1 {
-		t.Fatalf("expected 1 status event, got %d", count)
-	}
-
-	failures, backoff, oneShot := credential.nextStatusStreamBackoff(result, 3)
-	if !oneShot {
-		t.Fatal("expected one-shot backoff branch")
-	}
-	if failures != 0 {
-		t.Fatalf("expected failures reset, got %d", failures)
-	}
-	if backoff != credential.pollInterval {
-		t.Fatalf("expected poll interval backoff %v, got %v", credential.pollInterval, backoff)
-	}
-}
-
-func TestExternalCredentialConnectStatusStreamSingleFrameStreamReconnects(t *testing.T) {
-	headers := make(http.Header)
-	headers.Set(statusStreamHeader, "true")
-	credential, subscription := newTestOCMExternalCredential(t, "{\"five_hour_utilization\":12,\"weekly_utilization\":34,\"plan_weight\":2}\n", headers)
-	oldTime := time.Unix(123, 0)
-	credential.stateAccess.Lock()
-	credential.state.lastUpdated = oldTime
-	credential.stateAccess.Unlock()
-
-	result, err := credential.connectStatusStream(context.Background())
-	if err != io.EOF {
-		t.Fatalf("expected EOF, got %v", err)
-	}
-	if result.oneShot {
-		t.Fatal("did not expect one-shot result")
 	}
 	if result.frames != 1 {
 		t.Fatalf("expected 1 frame, got %d", result.frames)
@@ -152,10 +108,7 @@ func TestExternalCredentialConnectStatusStreamSingleFrameStreamReconnects(t *tes
 		t.Fatalf("expected 1 status event, got %d", count)
 	}
 
-	failures, backoff, oneShot := credential.nextStatusStreamBackoff(result, 3)
-	if oneShot {
-		t.Fatal("did not expect one-shot backoff branch")
-	}
+	failures, backoff := credential.nextStatusStreamBackoff(result, 3)
 	if failures != 4 {
 		t.Fatalf("expected failures incremented to 4, got %d", failures)
 	}
@@ -177,9 +130,6 @@ func TestExternalCredentialConnectStatusStreamMultiFrameKeepsLastUpdated(t *test
 	result, err := credential.connectStatusStream(context.Background())
 	if err != io.EOF {
 		t.Fatalf("expected EOF, got %v", err)
-	}
-	if result.oneShot {
-		t.Fatal("did not expect one-shot result")
 	}
 	if result.frames != 2 {
 		t.Fatalf("expected 2 frames, got %d", result.frames)
