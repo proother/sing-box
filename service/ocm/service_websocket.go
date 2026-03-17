@@ -49,6 +49,34 @@ func (s *webSocketSession) Close() {
 	})
 }
 
+type webSocketResponseCreateRequest struct {
+	Type        string `json:"type"`
+	Model       string `json:"model"`
+	ServiceTier string `json:"service_tier"`
+	Generate    *bool  `json:"generate"`
+}
+
+func parseWebSocketResponseCreateRequest(data []byte) (webSocketResponseCreateRequest, bool) {
+	var request webSocketResponseCreateRequest
+	if json.Unmarshal(data, &request) != nil {
+		return webSocketResponseCreateRequest{}, false
+	}
+	if request.Type != "response.create" || request.Model == "" {
+		return webSocketResponseCreateRequest{}, false
+	}
+	return request, true
+}
+
+func (r webSocketResponseCreateRequest) isWarmup() bool {
+	return r.Generate != nil && !*r.Generate
+}
+
+func signalWebSocketReady(channel chan struct{}, once *sync.Once) {
+	once.Do(func() {
+		close(channel)
+	})
+}
+
 func buildUpstreamWebSocketURL(baseURL string, proxyPath string) string {
 	upstreamURL := baseURL
 	if strings.HasPrefix(upstreamURL, "https://") {
@@ -295,13 +323,15 @@ func (s *Service) handleWebSocket(
 
 	var clientWriteAccess sync.Mutex
 	modelChannel := make(chan string, 1)
+	firstRealRequest := make(chan struct{})
+	var firstRealRequestOnce sync.Once
 	var waitGroup sync.WaitGroup
 
 	waitGroup.Add(3)
 	go func() {
 		defer waitGroup.Done()
 		defer session.Close()
-		s.proxyWebSocketClientToUpstream(ctx, clientConn, upstreamConn, selectedCredential, modelChannel, isNew, username, sessionID)
+		s.proxyWebSocketClientToUpstream(ctx, clientConn, upstreamConn, selectedCredential, modelChannel, firstRealRequest, &firstRealRequestOnce, isNew, username, sessionID)
 	}()
 	go func() {
 		defer waitGroup.Done()
@@ -311,12 +341,12 @@ func (s *Service) handleWebSocket(
 	go func() {
 		defer waitGroup.Done()
 		defer session.Close()
-		s.pushWebSocketAggregatedStatus(ctx, clientConn, &clientWriteAccess, session.closed, provider, userConfig)
+		s.pushWebSocketAggregatedStatus(ctx, clientConn, &clientWriteAccess, session.closed, firstRealRequest, provider, userConfig)
 	}()
 	waitGroup.Wait()
 }
 
-func (s *Service) proxyWebSocketClientToUpstream(ctx context.Context, clientConn net.Conn, upstreamConn net.Conn, selectedCredential Credential, modelChannel chan<- string, isNew bool, username string, sessionID string) {
+func (s *Service) proxyWebSocketClientToUpstream(ctx context.Context, clientConn net.Conn, upstreamConn net.Conn, selectedCredential Credential, modelChannel chan<- string, firstRealRequest chan struct{}, firstRealRequestOnce *sync.Once, isNew bool, username string, sessionID string) {
 	logged := false
 	for {
 		data, opCode, err := wsutil.ReadClientData(clientConn)
@@ -327,15 +357,10 @@ func (s *Service) proxyWebSocketClientToUpstream(ctx context.Context, clientConn
 			return
 		}
 
+		shouldSignalFirstRealRequest := false
 		if opCode == ws.OpText {
-			var request struct {
-				Type        string `json:"type"`
-				Model       string `json:"model"`
-				ServiceTier string `json:"service_tier"`
-				Generate    *bool  `json:"generate"`
-			}
-			if json.Unmarshal(data, &request) == nil && request.Type == "response.create" && request.Model != "" {
-				isWarmup := request.Generate != nil && !*request.Generate
+			if request, ok := parseWebSocketResponseCreateRequest(data); ok {
+				isWarmup := request.isWarmup()
 				if !isWarmup && isNew && !logged {
 					logged = true
 					logParts := []any{"assigned credential ", selectedCredential.tagName()}
@@ -357,6 +382,9 @@ func (s *Service) proxyWebSocketClientToUpstream(ctx context.Context, clientConn
 					default:
 					}
 				}
+				if !isWarmup {
+					shouldSignalFirstRealRequest = true
+				}
 			}
 		}
 
@@ -366,6 +394,9 @@ func (s *Service) proxyWebSocketClientToUpstream(ctx context.Context, clientConn
 				s.logger.DebugContext(ctx, "write upstream websocket: ", err)
 			}
 			return
+		}
+		if shouldSignalFirstRealRequest {
+			signalWebSocketReady(firstRealRequest, firstRealRequestOnce)
 		}
 	}
 }
@@ -477,21 +508,22 @@ func (s *Service) handleWebSocketErrorRateLimited(data []byte, selectedCredentia
 	selectedCredential.markRateLimited(resetAt)
 }
 
-func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn net.Conn, clientWriteAccess *sync.Mutex, sessionClosed <-chan struct{}, provider credentialProvider, userConfig *option.OCMUser) {
+func writeWebSocketAggregatedStatus(clientConn net.Conn, clientWriteAccess *sync.Mutex, status aggregatedStatus) error {
+	data := buildSyntheticRateLimitsEvent(status)
+	clientWriteAccess.Lock()
+	defer clientWriteAccess.Unlock()
+	return wsutil.WriteServerMessage(clientConn, ws.OpText, data)
+}
+
+func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn net.Conn, clientWriteAccess *sync.Mutex, sessionClosed <-chan struct{}, firstRealRequest <-chan struct{}, provider credentialProvider, userConfig *option.OCMUser) {
 	subscription, done, err := s.statusObserver.Subscribe()
 	if err != nil {
 		return
 	}
 	defer s.statusObserver.UnSubscribe(subscription)
 
-	last := s.computeAggregatedUtilization(provider, userConfig)
-	data := buildSyntheticRateLimitsEvent(last)
-	clientWriteAccess.Lock()
-	err = wsutil.WriteServerMessage(clientConn, ws.OpText, data)
-	clientWriteAccess.Unlock()
-	if err != nil {
-		return
-	}
+	var last aggregatedStatus
+	hasLast := false
 
 	for {
 		select {
@@ -501,6 +533,15 @@ func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn 
 			return
 		case <-sessionClosed:
 			return
+		case <-firstRealRequest:
+			current := s.computeAggregatedUtilization(provider, userConfig)
+			err = writeWebSocketAggregatedStatus(clientConn, clientWriteAccess, current)
+			if err != nil {
+				return
+			}
+			last = current
+			hasLast = true
+			firstRealRequest = nil
 		case <-subscription:
 			for {
 				select {
@@ -510,15 +551,15 @@ func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn 
 				}
 			}
 		drained:
+			if !hasLast {
+				continue
+			}
 			current := s.computeAggregatedUtilization(provider, userConfig)
 			if current.equal(last) {
 				continue
 			}
 			last = current
-			data = buildSyntheticRateLimitsEvent(current)
-			clientWriteAccess.Lock()
-			err = wsutil.WriteServerMessage(clientConn, ws.OpText, data)
-			clientWriteAccess.Unlock()
+			err = writeWebSocketAggregatedStatus(clientConn, clientWriteAccess, current)
 			if err != nil {
 				return
 			}
