@@ -195,6 +195,41 @@ func TestExternalCredentialConnectStatusStreamMultiFrameKeepsLastUpdated(t *test
 	}
 }
 
+func TestExternalCredentialPlanWeightOnlyHeaderEmitsStatus(t *testing.T) {
+	subscriber := observable.NewSubscriber[struct{}](8)
+	subscription, _ := subscriber.Subscription()
+	credential := &externalCredential{
+		tag:              "test",
+		logger:           newTestLogger(),
+		statusSubscriber: subscriber,
+	}
+	credential.stateAccess.Lock()
+	credential.state.remotePlanWeight = 2
+	oldTime := time.Unix(123, 0)
+	credential.state.lastUpdated = oldTime
+	credential.stateAccess.Unlock()
+
+	headers := make(http.Header)
+	headers.Set("X-CCM-Plan-Weight", "3")
+	credential.updateStateFromHeaders(headers)
+
+	if weight := credential.planWeight(); weight != 3 {
+		t.Fatalf("expected plan weight 3, got %v", weight)
+	}
+	if count := drainStatusEvents(subscription); count != 1 {
+		t.Fatalf("expected 1 status event, got %d", count)
+	}
+	if !credential.lastUpdatedTime().Equal(oldTime) {
+		t.Fatalf("expected lastUpdated to stay %v, got %v", oldTime, credential.lastUpdatedTime())
+	}
+
+	credential.updateStateFromHeaders(headers)
+
+	if count := drainStatusEvents(subscription); count != 0 {
+		t.Fatalf("expected no status event for unchanged plan weight, got %d", count)
+	}
+}
+
 func TestDefaultCredentialStatusChangesEmitStatus(t *testing.T) {
 	credentialPath := filepath.Join(t.TempDir(), "credentials.json")
 	err := os.WriteFile(credentialPath, []byte("{\"claudeAiOauth\":{\"accessToken\":\"token\",\"refreshToken\":\"\",\"expiresAt\":0,\"subscriptionType\":\"max\"}}\n"), 0o600)
