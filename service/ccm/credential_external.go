@@ -439,6 +439,8 @@ func (c *externalCredential) updateStateFromHeaders(headers http.Header) {
 	oldFiveHour := c.state.fiveHourUtilization
 	oldWeekly := c.state.weeklyUtilization
 	oldPlanWeight := c.state.remotePlanWeight
+	oldFiveHourReset := c.state.fiveHourReset
+	oldWeeklyReset := c.state.weeklyReset
 	hadData := false
 
 	if value, exists := parseOptionalAnthropicResetHeader(headers, "anthropic-ratelimit-unified-5h-reset"); exists {
@@ -483,7 +485,8 @@ func (c *externalCredential) updateStateFromHeaders(headers http.Header) {
 	}
 	utilizationChanged := c.state.fiveHourUtilization != oldFiveHour || c.state.weeklyUtilization != oldWeekly
 	planWeightChanged := c.state.remotePlanWeight != oldPlanWeight
-	shouldEmit := (hadData && utilizationChanged) || planWeightChanged
+	resetChanged := c.state.fiveHourReset != oldFiveHourReset || c.state.weeklyReset != oldWeeklyReset
+	shouldEmit := (hadData && (utilizationChanged || resetChanged)) || planWeightChanged
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
 	if shouldInterrupt {

@@ -201,20 +201,18 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		fiveHourReset := credential.fiveHourResetTime()
 		if !fiveHourReset.IsZero() {
 			hours := fiveHourReset.Sub(now).Hours()
-			if hours < 0 {
-				hours = 0
+			if hours > 0 {
+				totalWeightedHoursUntil5hReset += hours * weight
+				total5hResetWeight += weight
 			}
-			totalWeightedHoursUntil5hReset += hours * weight
-			total5hResetWeight += weight
 		}
 		weeklyReset := credential.weeklyResetTime()
 		if !weeklyReset.IsZero() {
 			hours := weeklyReset.Sub(now).Hours()
-			if hours < 0 {
-				hours = 0
+			if hours > 0 {
+				totalWeightedHoursUntilWeeklyReset += hours * weight
+				totalWeeklyResetWeight += weight
 			}
-			totalWeightedHoursUntilWeeklyReset += hours * weight
-			totalWeeklyResetWeight += weight
 		}
 	}
 	if totalWeight == 0 {
@@ -249,9 +247,13 @@ func (s *Service) rewriteResponseHeaders(headers http.Header, provider credentia
 	headers.Set("x-"+activeLimitIdentifier+"-secondary-used-percent", strconv.FormatFloat(status.weeklyUtilization, 'f', 2, 64))
 	if !status.fiveHourReset.IsZero() {
 		headers.Set("x-"+activeLimitIdentifier+"-primary-reset-at", strconv.FormatInt(status.fiveHourReset.Unix(), 10))
+	} else {
+		headers.Del("x-" + activeLimitIdentifier + "-primary-reset-at")
 	}
 	if !status.weeklyReset.IsZero() {
 		headers.Set("x-"+activeLimitIdentifier+"-secondary-reset-at", strconv.FormatInt(status.weeklyReset.Unix(), 10))
+	} else {
+		headers.Del("x-" + activeLimitIdentifier + "-secondary-reset-at")
 	}
 	if status.totalWeight > 0 {
 		headers.Set("X-OCM-Plan-Weight", strconv.FormatFloat(status.totalWeight, 'f', -1, 64))

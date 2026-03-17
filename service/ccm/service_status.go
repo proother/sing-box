@@ -201,20 +201,18 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		fiveHourReset := credential.fiveHourResetTime()
 		if !fiveHourReset.IsZero() {
 			hours := fiveHourReset.Sub(now).Hours()
-			if hours < 0 {
-				hours = 0
+			if hours > 0 {
+				totalWeightedHoursUntil5hReset += hours * weight
+				total5hResetWeight += weight
 			}
-			totalWeightedHoursUntil5hReset += hours * weight
-			total5hResetWeight += weight
 		}
 		weeklyReset := credential.weeklyResetTime()
 		if !weeklyReset.IsZero() {
 			hours := weeklyReset.Sub(now).Hours()
-			if hours < 0 {
-				hours = 0
+			if hours > 0 {
+				totalWeightedHoursUntilWeeklyReset += hours * weight
+				totalWeeklyResetWeight += weight
 			}
-			totalWeightedHoursUntilWeeklyReset += hours * weight
-			totalWeeklyResetWeight += weight
 		}
 	}
 	if totalWeight == 0 {
@@ -245,9 +243,13 @@ func (s *Service) rewriteResponseHeaders(headers http.Header, provider credentia
 	headers.Set("anthropic-ratelimit-unified-7d-utilization", strconv.FormatFloat(status.weeklyUtilization/100, 'f', 6, 64))
 	if !status.fiveHourReset.IsZero() {
 		headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(status.fiveHourReset.Unix(), 10))
+	} else {
+		headers.Del("anthropic-ratelimit-unified-5h-reset")
 	}
 	if !status.weeklyReset.IsZero() {
 		headers.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(status.weeklyReset.Unix(), 10))
+	} else {
+		headers.Del("anthropic-ratelimit-unified-7d-reset")
 	}
 	if status.totalWeight > 0 {
 		headers.Set("X-CCM-Plan-Weight", strconv.FormatFloat(status.totalWeight, 'f', -1, 64))
