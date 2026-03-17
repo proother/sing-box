@@ -954,6 +954,8 @@ func (c *externalCredential) getReverseSession() *yamux.Session {
 
 func (c *externalCredential) setReverseSession(session *yamux.Session) bool {
 	var emitStatus bool
+	var restartStatusStream bool
+	var triggerUsageRefresh bool
 	c.reverseAccess.Lock()
 	if c.closed {
 		c.reverseAccess.Unlock()
@@ -964,9 +966,22 @@ func (c *externalCredential) setReverseSession(session *yamux.Session) bool {
 	c.reverseSession = session
 	isAvailable := c.baseURL == reverseProxyBaseURL && c.reverseSession != nil && !c.reverseSession.IsClosed()
 	emitStatus = wasAvailable != isAvailable
+	if isAvailable && !wasAvailable {
+		c.reverseCancel()
+		c.reverseContext, c.reverseCancel = context.WithCancel(context.Background())
+		restartStatusStream = true
+		triggerUsageRefresh = true
+	}
 	c.reverseAccess.Unlock()
 	if old != nil {
 		old.Close()
+	}
+	if restartStatusStream {
+		c.logger.Debug("poll usage for ", c.tag, ": reverse session ready, restarting status stream")
+		go c.statusStreamLoop()
+	}
+	if triggerUsageRefresh {
+		go c.pollUsage(c.getReverseContext())
 	}
 	if emitStatus {
 		c.emitStatusUpdate()
