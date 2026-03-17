@@ -103,7 +103,7 @@ func (s *Service) handleStatusEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider.pollIfStale(r.Context())
+	provider.pollIfStale()
 	status := s.computeAggregatedUtilization(provider, userConfig)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -125,7 +125,7 @@ func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, pro
 	}
 	defer s.statusObserver.UnSubscribe(subscription)
 
-	provider.pollIfStale(r.Context())
+	provider.pollIfStale()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

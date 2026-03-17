@@ -16,7 +16,7 @@ type credentialProvider interface {
 	selectCredential(sessionID string, selection credentialSelection) (Credential, bool, error)
 	onRateLimited(sessionID string, credential Credential, resetAt time.Time, selection credentialSelection) Credential
 	linkProviderInterrupt(credential Credential, selection credentialSelection, onInterrupt func()) func() bool
-	pollIfStale(ctx context.Context)
+	pollIfStale()
 	allCredentials() []Credential
 	close()
 }
@@ -58,7 +58,7 @@ func (p *singleCredentialProvider) onRateLimited(_ string, credential Credential
 	return nil
 }
 
-func (p *singleCredentialProvider) pollIfStale(ctx context.Context) {
+func (p *singleCredentialProvider) pollIfStale() {
 	now := time.Now()
 	p.sessionAccess.Lock()
 	for id, createdAt := range p.sessions {
@@ -69,7 +69,7 @@ func (p *singleCredentialProvider) pollIfStale(ctx context.Context) {
 	p.sessionAccess.Unlock()
 
 	if time.Since(p.credential.lastUpdatedTime()) > p.credential.pollBackoff(defaultPollInterval) {
-		p.credential.pollUsage(ctx)
+		p.credential.pollUsage()
 	}
 }
 
@@ -357,7 +357,7 @@ func (p *balancerProvider) pickRandom(filter func(Credential) bool) Credential {
 	return usable[rand.IntN(len(usable))]
 }
 
-func (p *balancerProvider) pollIfStale(ctx context.Context) {
+func (p *balancerProvider) pollIfStale() {
 	now := time.Now()
 	p.sessionAccess.Lock()
 	for id, entry := range p.sessions {
@@ -377,7 +377,7 @@ func (p *balancerProvider) pollIfStale(ctx context.Context) {
 
 	for _, credential := range p.credentials {
 		if time.Since(credential.lastUpdatedTime()) > credential.pollBackoff(p.pollInterval) {
-			credential.pollUsage(ctx)
+			credential.pollUsage()
 		}
 	}
 }

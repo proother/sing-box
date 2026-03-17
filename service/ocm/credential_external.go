@@ -615,13 +615,14 @@ func (c *externalCredential) doPollUsageRequest(ctx context.Context) (*http.Resp
 	return nil, E.New("no transport available")
 }
 
-func (c *externalCredential) pollUsage(ctx context.Context) {
+func (c *externalCredential) pollUsage() {
 	if !c.pollAccess.TryLock() {
 		return
 	}
 	defer c.pollAccess.Unlock()
 	defer c.markUsagePollAttempted()
 
+	ctx := c.getReverseContext()
 	response, err := c.doPollUsageRequest(ctx)
 	if err != nil {
 		c.logger.Debug("poll usage for ", c.tag, ": ", err)
@@ -988,7 +989,7 @@ func (c *externalCredential) setReverseSession(session *yamux.Session) bool {
 		go c.statusStreamLoop()
 	}
 	if triggerUsageRefresh {
-		go c.pollUsage(c.getReverseContext())
+		go c.pollUsage()
 	}
 	if emitStatus {
 		c.emitStatusUpdate()

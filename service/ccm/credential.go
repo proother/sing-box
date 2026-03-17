@@ -120,7 +120,7 @@ type Credential interface {
 
 	setStatusSubscriber(*observable.Subscriber[struct{}])
 	start() error
-	pollUsage(ctx context.Context)
+	pollUsage()
 	lastUpdatedTime() time.Time
 	pollBackoff(base time.Duration) time.Duration
 	usageTrackerOrNil() *AggregatedUsage

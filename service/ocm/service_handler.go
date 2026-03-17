@@ -131,7 +131,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider.pollIfStale(s.ctx)
+	provider.pollIfStale()
 
 	selection := credentialSelectionForUser(userConfig)
 
@@ -285,7 +285,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusTooManyRequests {
 		body, _ := io.ReadAll(response.Body)
 		s.logger.ErrorContext(ctx, "upstream error from ", selectedCredential.tagName(), ": status ", response.StatusCode, " ", string(body))
-		go selectedCredential.pollUsage(s.ctx)
+		go selectedCredential.pollUsage()
 		writeJSONError(w, r, http.StatusInternalServerError, "api_error",
 			"proxy request (status "+strconv.Itoa(response.StatusCode)+"): "+string(body))
 		return

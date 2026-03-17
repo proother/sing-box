@@ -143,6 +143,7 @@ func (c *defaultCredential) start() error {
 			c.logger.Warn("load usage statistics for ", c.tag, ": ", err)
 		}
 	}
+	go c.pollUsage()
 	return nil
 }
 
@@ -597,7 +598,7 @@ func (c *defaultCredential) ocmGetBaseURL() string {
 	return c.getBaseURL()
 }
 
-func (c *defaultCredential) pollUsage(ctx context.Context) {
+func (c *defaultCredential) pollUsage() {
 	if !c.pollAccess.TryLock() {
 		return
 	}
@@ -621,6 +622,7 @@ func (c *defaultCredential) pollUsage(ctx context.Context) {
 		return
 	}
 
+	ctx := c.serviceContext
 	usageURL := strings.TrimSuffix(chatGPTBackendURL, "/codex") + "/wham/usage"
 
 	accountID := c.getAccountID()

@@ -139,6 +139,7 @@ func (c *defaultCredential) start() error {
 			c.logger.Warn("load usage statistics for ", c.tag, ": ", err)
 		}
 	}
+	go c.pollUsage()
 	return nil
 }
 
@@ -516,7 +517,7 @@ func (c *defaultCredential) earliestReset() time.Time {
 	return earliest
 }
 
-func (c *defaultCredential) pollUsage(ctx context.Context) {
+func (c *defaultCredential) pollUsage() {
 	if !c.pollAccess.TryLock() {
 		return
 	}
@@ -537,6 +538,7 @@ func (c *defaultCredential) pollUsage(ctx context.Context) {
 		return
 	}
 
+	ctx := c.serviceContext
 	httpClient := &http.Client{
 		Transport: c.forwardHTTPClient.Transport,
 		Timeout:   5 * time.Second,
@@ -633,11 +635,12 @@ func (c *defaultCredential) pollUsage(ctx context.Context) {
 	c.emitStatusUpdate()
 
 	if needsProfileFetch {
-		c.fetchProfile(ctx, httpClient, accessToken)
+		c.fetchProfile(httpClient, accessToken)
 	}
 }
 
-func (c *defaultCredential) fetchProfile(ctx context.Context, httpClient *http.Client, accessToken string) {
+func (c *defaultCredential) fetchProfile(httpClient *http.Client, accessToken string) {
+	ctx := c.serviceContext
 	response, err := doHTTPWithRetry(ctx, httpClient, func() (*http.Request, error) {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, claudeAPIBaseURL+"/api/oauth/profile", nil)
 		if err != nil {
