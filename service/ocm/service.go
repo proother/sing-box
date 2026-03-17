@@ -18,6 +18,7 @@ import (
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/observable"
 	aTLS "github.com/sagernet/sing/common/tls"
 
 	"github.com/go-chi/chi/v5"
@@ -176,9 +177,11 @@ type Service struct {
 	webSocketConns  map[*webSocketSession]struct{}
 	shuttingDown    bool
 
-	providers      map[string]credentialProvider
-	allCredentials []Credential
-	userConfigMap  map[string]*option.OCMUser
+	providers        map[string]credentialProvider
+	allCredentials   []Credential
+	userConfigMap    map[string]*option.OCMUser
+	statusSubscriber *observable.Subscriber[struct{}]
+	statusObserver   *observable.Observer[struct{}]
 }
 
 func NewService(ctx context.Context, logger log.ContextLogger, tag string, options option.OCMServiceOptions) (adapter.Service, error) {
@@ -210,6 +213,8 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		tokenMap: make(map[string]string),
 	}
 
+	statusSubscriber := observable.NewSubscriber[struct{}](16)
+
 	service := &Service{
 		Adapter:     boxService.NewAdapter(C.TypeOCM, tag),
 		ctx:         ctx,
@@ -222,8 +227,10 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 			Network: []string{N.NetworkTCP},
 			Listen:  options.ListenOptions,
 		}),
-		userManager:    userManager,
-		webSocketConns: make(map[*webSocketSession]struct{}),
+		userManager:      userManager,
+		statusSubscriber: statusSubscriber,
+		statusObserver:   observable.NewObserver[struct{}](statusSubscriber, 8),
+		webSocketConns:   make(map[*webSocketSession]struct{}),
 	}
 
 	providers, allCredentials, err := buildOCMCredentialProviders(ctx, options, logger)
@@ -258,6 +265,7 @@ func (s *Service) Start(stage adapter.StartStage) error {
 	s.userManager.UpdateUsers(s.options.Users)
 
 	for _, credential := range s.allCredentials {
+		credential.setStatusSubscriber(s.statusSubscriber)
 		if external, ok := credential.(*externalCredential); ok && external.reverse && external.connectorURL != nil {
 			external.reverseService = s
 		}
@@ -324,6 +332,7 @@ func (s *Service) InterfaceUpdated() {
 }
 
 func (s *Service) Close() error {
+	s.statusObserver.Close()
 	webSocketSessions := s.startWebSocketShutdown()
 
 	err := common.Close(

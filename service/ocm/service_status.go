@@ -1,6 +1,7 @@
 package ocm
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -55,6 +56,11 @@ func (s *Service) handleStatusEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Query().Get("watch") == "true" {
+		s.handleStatusStream(w, r, provider, userConfig)
+		return
+	}
+
 	provider.pollIfStale(r.Context())
 	avgFiveHour, avgWeekly, totalWeight := s.computeAggregatedUtilization(provider, userConfig)
 
@@ -65,6 +71,76 @@ func (s *Service) handleStatusEndpoint(w http.ResponseWriter, r *http.Request) {
 		"weekly_utilization":    avgWeekly,
 		"plan_weight":           totalWeight,
 	})
+}
+
+func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, provider credentialProvider, userConfig *option.OCMUser) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSONError(w, r, http.StatusInternalServerError, "api_error", "streaming not supported")
+		return
+	}
+
+	subscription, done, err := s.statusObserver.Subscribe()
+	if err != nil {
+		writeJSONError(w, r, http.StatusInternalServerError, "api_error", "service closing")
+		return
+	}
+	defer s.statusObserver.UnSubscribe(subscription)
+
+	provider.pollIfStale(r.Context())
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(statusStreamHeader, "true")
+	w.WriteHeader(http.StatusOK)
+
+	lastFiveHour, lastWeekly, lastWeight := s.computeAggregatedUtilization(provider, userConfig)
+	buf := &bytes.Buffer{}
+	json.NewEncoder(buf).Encode(map[string]float64{
+		"five_hour_utilization": lastFiveHour,
+		"weekly_utilization":    lastWeekly,
+		"plan_weight":           lastWeight,
+	})
+	_, writeErr := w.Write(buf.Bytes())
+	if writeErr != nil {
+		return
+	}
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-done:
+			return
+		case <-subscription:
+			for {
+				select {
+				case <-subscription:
+				default:
+					goto drained
+				}
+			}
+		drained:
+			fiveHour, weekly, weight := s.computeAggregatedUtilization(provider, userConfig)
+			if fiveHour == lastFiveHour && weekly == lastWeekly && weight == lastWeight {
+				continue
+			}
+			lastFiveHour = fiveHour
+			lastWeekly = weekly
+			lastWeight = weight
+			buf.Reset()
+			json.NewEncoder(buf).Encode(map[string]float64{
+				"five_hour_utilization": fiveHour,
+				"weekly_utilization":    weekly,
+				"plan_weight":           weight,
+			})
+			_, writeErr = w.Write(buf.Bytes())
+			if writeErr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Service) computeAggregatedUtilization(provider credentialProvider, userConfig *option.OCMUser) (float64, float64, float64) {

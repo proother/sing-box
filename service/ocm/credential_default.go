@@ -22,6 +22,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/ntp"
+	"github.com/sagernet/sing/common/observable"
 )
 
 type defaultCredential struct {
@@ -44,6 +45,8 @@ type defaultCredential struct {
 	logger             log.ContextLogger
 	watcher            *fswatch.Watcher
 	watcherRetryAt     time.Time
+
+	statusSubscriber *observable.Subscriber[struct{}]
 
 	// Connection interruption
 	onBecameUnusable func()
@@ -147,6 +150,16 @@ func (c *defaultCredential) setOnBecameUnusable(fn func()) {
 	c.onBecameUnusable = fn
 }
 
+func (c *defaultCredential) setStatusSubscriber(subscriber *observable.Subscriber[struct{}]) {
+	c.statusSubscriber = subscriber
+}
+
+func (c *defaultCredential) emitStatusUpdate() {
+	if c.statusSubscriber != nil {
+		c.statusSubscriber.Emit(struct{}{})
+	}
+}
+
 func (c *defaultCredential) tagName() string {
 	return c.tag
 }
@@ -202,11 +215,16 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 	if latestErr == nil && !credentialsEqual(latestCredentials, baseCredentials) {
 		c.credentials = latestCredentials
 		c.stateAccess.Lock()
+		wasAvailable := !c.state.unavailable
 		c.state.unavailable = false
 		c.state.lastCredentialLoadAttempt = time.Now()
 		c.state.lastCredentialLoadError = ""
 		c.checkTransitionLocked()
+		shouldEmit := wasAvailable != !c.state.unavailable
 		c.stateAccess.Unlock()
+		if shouldEmit {
+			c.emitStatusUpdate()
+		}
 		if !latestCredentials.needsRefresh() {
 			return latestCredentials.getAccessToken(), nil
 		}
@@ -215,11 +233,16 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 
 	c.credentials = newCredentials
 	c.stateAccess.Lock()
+	wasAvailable := !c.state.unavailable
 	c.state.unavailable = false
 	c.state.lastCredentialLoadAttempt = time.Now()
 	c.state.lastCredentialLoadError = ""
 	c.checkTransitionLocked()
+	shouldEmit := wasAvailable != !c.state.unavailable
 	c.stateAccess.Unlock()
+	if shouldEmit {
+		c.emitStatusUpdate()
+	}
 
 	err = platformWriteCredentials(newCredentials, c.credentialPath)
 	if err != nil {
@@ -329,6 +352,9 @@ func (c *defaultCredential) updateStateFromHeaders(headers http.Header) {
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
+	if hadData {
+		c.emitStatusUpdate()
+	}
 }
 
 func (c *defaultCredential) markRateLimited(resetAt time.Time) {
@@ -341,6 +367,7 @@ func (c *defaultCredential) markRateLimited(resetAt time.Time) {
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
+	c.emitStatusUpdate()
 }
 
 func (c *defaultCredential) isUsable() bool {
@@ -692,6 +719,7 @@ func (c *defaultCredential) pollUsage(ctx context.Context) {
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
+	c.emitStatusUpdate()
 }
 
 func (c *defaultCredential) buildProxyRequest(ctx context.Context, original *http.Request, bodyBytes []byte, serviceHeaders http.Header) (*http.Request, error) {

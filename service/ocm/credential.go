@@ -9,6 +9,7 @@ import (
 	"time"
 
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/observable"
 )
 
 const (
@@ -118,6 +119,7 @@ type Credential interface {
 	interruptConnections()
 
 	setOnBecameUnusable(fn func())
+	setStatusSubscriber(*observable.Subscriber[struct{}])
 	start() error
 	pollUsage(ctx context.Context)
 	lastUpdatedTime() time.Time

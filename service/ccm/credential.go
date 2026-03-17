@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/sagernet/sing/common/observable"
 )
 
 const (
@@ -115,6 +117,7 @@ type Credential interface {
 	wrapRequestContext(ctx context.Context) *credentialRequestContext
 	interruptConnections()
 
+	setStatusSubscriber(*observable.Subscriber[struct{}])
 	start() error
 	pollUsage(ctx context.Context)
 	lastUpdatedTime() time.Time

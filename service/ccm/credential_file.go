@@ -111,12 +111,18 @@ func (c *defaultCredential) reloadCredentials(force bool) error {
 	c.access.Unlock()
 
 	c.stateAccess.Lock()
+	wasAvailable, oldWeight := c.statusAggregateStateLocked()
 	c.state.unavailable = false
 	c.state.lastCredentialLoadError = ""
 	c.state.accountType = credentials.SubscriptionType
 	c.state.rateLimitTier = credentials.RateLimitTier
 	c.checkTransitionLocked()
+	isAvailable, newWeight := c.statusAggregateStateLocked()
+	shouldEmit := wasAvailable != isAvailable || oldWeight != newWeight
 	c.stateAccess.Unlock()
+	if shouldEmit {
+		c.emitStatusUpdate()
+	}
 
 	return nil
 }
@@ -128,15 +134,21 @@ func (c *defaultCredential) markCredentialsUnavailable(err error) error {
 	c.access.Unlock()
 
 	c.stateAccess.Lock()
+	wasAvailable, oldWeight := c.statusAggregateStateLocked()
 	c.state.unavailable = true
 	c.state.lastCredentialLoadError = err.Error()
 	c.state.accountType = ""
 	c.state.rateLimitTier = ""
 	shouldInterrupt := c.checkTransitionLocked()
+	isAvailable, newWeight := c.statusAggregateStateLocked()
+	shouldEmit := wasAvailable != isAvailable || oldWeight != newWeight
 	c.stateAccess.Unlock()
 
 	if shouldInterrupt && hadCredentials {
 		c.interruptConnections()
+	}
+	if shouldEmit {
+		c.emitStatusUpdate()
 	}
 
 	return err

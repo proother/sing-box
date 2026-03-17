@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-
 	"github.com/sagernet/sing-box/adapter"
 	boxService "github.com/sagernet/sing-box/adapter/service"
 	"github.com/sagernet/sing-box/common/listener"
@@ -17,6 +16,7 @@ import (
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/observable"
 	aTLS "github.com/sagernet/sing/common/tls"
 
 	"github.com/go-chi/chi/v5"
@@ -150,18 +150,21 @@ func isAPIKeyHeader(header string) bool {
 
 type Service struct {
 	boxService.Adapter
-	ctx           context.Context
-	logger        log.ContextLogger
-	options       option.CCMServiceOptions
-	httpHeaders   http.Header
-	listener      *listener.Listener
-	tlsConfig     tls.ServerConfig
-	httpServer    *http.Server
+	ctx         context.Context
+	logger      log.ContextLogger
+	options     option.CCMServiceOptions
+	httpHeaders http.Header
+	listener    *listener.Listener
+	tlsConfig   tls.ServerConfig
+	httpServer  *http.Server
 	userManager *UserManager
 
 	providers      map[string]credentialProvider
 	allCredentials []Credential
 	userConfigMap  map[string]*option.CCMUser
+
+	statusSubscriber *observable.Subscriber[struct{}]
+	statusObserver   *observable.Observer[struct{}]
 }
 
 func NewService(ctx context.Context, logger log.ContextLogger, tag string, options option.CCMServiceOptions) (adapter.Service, error) {
@@ -195,6 +198,7 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 		tokenMap: make(map[string]string),
 	}
 
+	statusSubscriber := observable.NewSubscriber[struct{}](16)
 	service := &Service{
 		Adapter:     boxService.NewAdapter(C.TypeCCM, tag),
 		ctx:         ctx,
@@ -207,7 +211,9 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 			Network: []string{N.NetworkTCP},
 			Listen:  options.ListenOptions,
 		}),
-		userManager: userManager,
+		userManager:      userManager,
+		statusSubscriber: statusSubscriber,
+		statusObserver:   observable.NewObserver[struct{}](statusSubscriber, 8),
 	}
 
 	providers, allCredentials, err := buildCredentialProviders(ctx, options, logger)
@@ -242,6 +248,7 @@ func (s *Service) Start(stage adapter.StartStage) error {
 	s.userManager.UpdateUsers(s.options.Users)
 
 	for _, credential := range s.allCredentials {
+		credential.setStatusSubscriber(s.statusSubscriber)
 		if external, ok := credential.(*externalCredential); ok && external.reverse && external.connectorURL != nil {
 			external.reverseService = s
 		}
@@ -300,6 +307,7 @@ func (s *Service) InterfaceUpdated() {
 }
 
 func (s *Service) Close() error {
+	s.statusObserver.Close()
 	err := common.Close(
 		common.PtrOrNil(s.httpServer),
 		common.PtrOrNil(s.listener),

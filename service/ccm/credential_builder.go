@@ -161,4 +161,3 @@ func credentialForUser(
 	}
 	return provider, nil
 }
-

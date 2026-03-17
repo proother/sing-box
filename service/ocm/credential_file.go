@@ -111,10 +111,15 @@ func (c *defaultCredential) reloadCredentials(force bool) error {
 	c.access.Unlock()
 
 	c.stateAccess.Lock()
+	wasAvailable := !c.state.unavailable
 	c.state.unavailable = false
 	c.state.lastCredentialLoadError = ""
 	c.checkTransitionLocked()
+	shouldEmit := wasAvailable != !c.state.unavailable
 	c.stateAccess.Unlock()
+	if shouldEmit {
+		c.emitStatusUpdate()
+	}
 
 	return nil
 }
@@ -126,13 +131,18 @@ func (c *defaultCredential) markCredentialsUnavailable(err error) error {
 	c.access.Unlock()
 
 	c.stateAccess.Lock()
+	wasAvailable := !c.state.unavailable
 	c.state.unavailable = true
 	c.state.lastCredentialLoadError = err.Error()
 	shouldInterrupt := c.checkTransitionLocked()
+	shouldEmit := wasAvailable != !c.state.unavailable
 	c.stateAccess.Unlock()
 
 	if shouldInterrupt && hadCredentials {
 		c.interruptConnections()
+	}
+	if shouldEmit {
+		c.emitStatusUpdate()
 	}
 
 	return err

@@ -23,11 +23,15 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/ntp"
+	"github.com/sagernet/sing/common/observable"
 
 	"github.com/hashicorp/yamux"
 )
 
-const reverseProxyBaseURL = "http://reverse-proxy"
+const (
+	reverseProxyBaseURL = "http://reverse-proxy"
+	statusStreamHeader  = "X-OCM-Status-Stream"
+)
 
 type externalCredential struct {
 	tag               string
@@ -42,6 +46,7 @@ type externalCredential struct {
 	usageTracker      *AggregatedUsage
 	logger            log.ContextLogger
 
+	statusSubscriber *observable.Subscriber[struct{}]
 	onBecameUnusable func()
 	interrupted      bool
 	requestContext   context.Context
@@ -67,6 +72,12 @@ type externalCredential struct {
 
 type reverseSessionDialer struct {
 	credential *externalCredential
+}
+
+type statusStreamResult struct {
+	duration time.Duration
+	frames   int
+	oneShot  bool
 }
 
 func (d reverseSessionDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -249,12 +260,24 @@ func (c *externalCredential) start() error {
 	}
 	if c.reverse && c.connectorURL != nil {
 		go c.connectorLoop()
+	} else {
+		go c.statusStreamLoop()
 	}
 	return nil
 }
 
 func (c *externalCredential) setOnBecameUnusable(fn func()) {
 	c.onBecameUnusable = fn
+}
+
+func (c *externalCredential) setStatusSubscriber(subscriber *observable.Subscriber[struct{}]) {
+	c.statusSubscriber = subscriber
+}
+
+func (c *externalCredential) emitStatusUpdate() {
+	if c.statusSubscriber != nil {
+		c.statusSubscriber.Emit(struct{}{})
+	}
 }
 
 func (c *externalCredential) tagName() string {
@@ -342,6 +365,7 @@ func (c *externalCredential) markRateLimited(resetAt time.Time) {
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
+	c.emitStatusUpdate()
 }
 
 func (c *externalCredential) earliestReset() time.Time {
@@ -498,6 +522,9 @@ func (c *externalCredential) updateStateFromHeaders(headers http.Header) {
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
+	if hadData {
+		c.emitStatusUpdate()
+	}
 }
 
 func (c *externalCredential) checkTransitionLocked() bool {
@@ -638,12 +665,167 @@ func (c *externalCredential) pollUsage(ctx context.Context) {
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
+	c.emitStatusUpdate()
+}
+
+func (c *externalCredential) statusStreamLoop() {
+	var consecutiveFailures int
+	ctx := c.getReverseContext()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		result, err := c.connectStatusStream(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		var backoff time.Duration
+		var oneShot bool
+		consecutiveFailures, backoff, oneShot = c.nextStatusStreamBackoff(result, consecutiveFailures)
+		if oneShot {
+			c.logger.Debug("status stream for ", c.tag, " returned a single-frame response, retrying in ", backoff)
+		} else {
+			c.logger.Debug("status stream for ", c.tag, " disconnected: ", err, ", reconnecting in ", backoff)
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		}
+	}
+}
+
+func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStreamResult, error) {
+	startTime := time.Now()
+	result := statusStreamResult{}
+	response, err := c.doStreamStatusRequest(ctx)
+	if err != nil {
+		result.duration = time.Since(startTime)
+		return result, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		result.duration = time.Since(startTime)
+		return result, E.New("status ", response.StatusCode, " ", string(body))
+	}
+
+	decoder := json.NewDecoder(response.Body)
+	isStatusStream := response.Header.Get(statusStreamHeader) == "true"
+	previousLastUpdated := c.lastUpdatedTime()
+	var firstFrameUpdatedAt time.Time
+	for {
+		var statusResponse struct {
+			FiveHourUtilization float64 `json:"five_hour_utilization"`
+			WeeklyUtilization   float64 `json:"weekly_utilization"`
+			PlanWeight          float64 `json:"plan_weight"`
+		}
+		err = decoder.Decode(&statusResponse)
+		if err != nil {
+			result.duration = time.Since(startTime)
+			if result.frames == 1 && err == io.EOF && !isStatusStream {
+				result.oneShot = true
+				c.restoreLastUpdatedIfUnchanged(firstFrameUpdatedAt, previousLastUpdated)
+			}
+			return result, err
+		}
+
+		c.stateAccess.Lock()
+		c.state.consecutivePollFailures = 0
+		c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
+		c.state.weeklyUtilization = statusResponse.WeeklyUtilization
+		if statusResponse.PlanWeight > 0 {
+			c.state.remotePlanWeight = statusResponse.PlanWeight
+		}
+		if c.state.hardRateLimited && time.Now().After(c.state.rateLimitResetAt) {
+			c.state.hardRateLimited = false
+		}
+		shouldInterrupt := c.checkTransitionLocked()
+		c.stateAccess.Unlock()
+		if shouldInterrupt {
+			c.interruptConnections()
+		}
+		result.frames++
+		updatedAt := c.markUsageStreamUpdated()
+		if result.frames == 1 {
+			firstFrameUpdatedAt = updatedAt
+		}
+		c.emitStatusUpdate()
+	}
+}
+
+func (c *externalCredential) nextStatusStreamBackoff(result statusStreamResult, consecutiveFailures int) (int, time.Duration, bool) {
+	if result.oneShot {
+		return 0, c.pollInterval, true
+	}
+	if result.duration >= connectorBackoffResetThreshold {
+		consecutiveFailures = 0
+	}
+	consecutiveFailures++
+	return consecutiveFailures, connectorBackoff(consecutiveFailures), false
+}
+
+func (c *externalCredential) doStreamStatusRequest(ctx context.Context) (*http.Response, error) {
+	buildRequest := func(baseURL string) (*http.Request, error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/ocm/v1/status?watch=true", nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Authorization", "Bearer "+c.token)
+		return request, nil
+	}
+	if c.reverseHTTPClient != nil {
+		session := c.getReverseSession()
+		if session != nil && !session.IsClosed() {
+			request, err := buildRequest(reverseProxyBaseURL)
+			if err != nil {
+				return nil, err
+			}
+			response, err := c.reverseHTTPClient.Do(request)
+			if err == nil {
+				return response, nil
+			}
+		}
+	}
+	if c.forwardHTTPClient != nil {
+		request, err := buildRequest(c.baseURL)
+		if err != nil {
+			return nil, err
+		}
+		return c.forwardHTTPClient.Do(request)
+	}
+	return nil, E.New("no transport available")
 }
 
 func (c *externalCredential) lastUpdatedTime() time.Time {
 	c.stateAccess.RLock()
 	defer c.stateAccess.RUnlock()
 	return c.state.lastUpdated
+}
+
+func (c *externalCredential) markUsageStreamUpdated() time.Time {
+	c.stateAccess.Lock()
+	defer c.stateAccess.Unlock()
+	now := time.Now()
+	c.state.lastUpdated = now
+	return now
+}
+
+func (c *externalCredential) restoreLastUpdatedIfUnchanged(expectedCurrent time.Time, previous time.Time) {
+	if expectedCurrent.IsZero() {
+		return
+	}
+	c.stateAccess.Lock()
+	defer c.stateAccess.Unlock()
+	if c.state.lastUpdated.Equal(expectedCurrent) {
+		c.state.lastUpdated = previous
+	}
 }
 
 func (c *externalCredential) markUsagePollAttempted() {
@@ -736,26 +918,40 @@ func (c *externalCredential) getReverseSession() *yamux.Session {
 }
 
 func (c *externalCredential) setReverseSession(session *yamux.Session) bool {
+	var emitStatus bool
 	c.reverseAccess.Lock()
 	if c.closed {
 		c.reverseAccess.Unlock()
 		return false
 	}
+	wasAvailable := c.baseURL == reverseProxyBaseURL && c.reverseSession != nil && !c.reverseSession.IsClosed()
 	old := c.reverseSession
 	c.reverseSession = session
+	isAvailable := c.baseURL == reverseProxyBaseURL && c.reverseSession != nil && !c.reverseSession.IsClosed()
+	emitStatus = wasAvailable != isAvailable
 	c.reverseAccess.Unlock()
 	if old != nil {
 		old.Close()
+	}
+	if emitStatus {
+		c.emitStatusUpdate()
 	}
 	return true
 }
 
 func (c *externalCredential) clearReverseSession(session *yamux.Session) {
+	var emitStatus bool
 	c.reverseAccess.Lock()
+	wasAvailable := c.baseURL == reverseProxyBaseURL && c.reverseSession != nil && !c.reverseSession.IsClosed()
 	if c.reverseSession == session {
 		c.reverseSession = nil
 	}
+	isAvailable := c.baseURL == reverseProxyBaseURL && c.reverseSession != nil && !c.reverseSession.IsClosed()
+	emitStatus = wasAvailable != isAvailable
 	c.reverseAccess.Unlock()
+	if emitStatus {
+		c.emitStatusUpdate()
+	}
 }
 
 func (c *externalCredential) getReverseContext() context.Context {

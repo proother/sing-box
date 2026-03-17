@@ -21,6 +21,7 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/ntp"
+	"github.com/sagernet/sing/common/observable"
 )
 
 type defaultCredential struct {
@@ -43,11 +44,13 @@ type defaultCredential struct {
 	watcher            *fswatch.Watcher
 	watcherRetryAt     time.Time
 
+	statusSubscriber *observable.Subscriber[struct{}]
+
 	// Connection interruption
 	interrupted    bool
-	requestContext   context.Context
-	cancelRequests   context.CancelFunc
-	requestAccess    sync.Mutex
+	requestContext context.Context
+	cancelRequests context.CancelFunc
+	requestAccess  sync.Mutex
 }
 
 func newDefaultCredential(ctx context.Context, tag string, options option.CCMDefaultCredentialOptions, logger log.ContextLogger) (*defaultCredential, error) {
@@ -139,6 +142,23 @@ func (c *defaultCredential) start() error {
 	return nil
 }
 
+func (c *defaultCredential) setStatusSubscriber(subscriber *observable.Subscriber[struct{}]) {
+	c.statusSubscriber = subscriber
+}
+
+func (c *defaultCredential) emitStatusUpdate() {
+	if c.statusSubscriber != nil {
+		c.statusSubscriber.Emit(struct{}{})
+	}
+}
+
+func (c *defaultCredential) statusAggregateStateLocked() (bool, float64) {
+	if c.state.unavailable {
+		return false, 0
+	}
+	return true, ccmPlanWeight(c.state.accountType, c.state.rateLimitTier)
+}
+
 func (c *defaultCredential) getAccessToken() (string, error) {
 	c.retryCredentialReloadIfNeeded()
 
@@ -186,13 +206,19 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 	if latestErr == nil && !credentialsEqual(latestCredentials, baseCredentials) {
 		c.credentials = latestCredentials
 		c.stateAccess.Lock()
+		wasAvailable, oldWeight := c.statusAggregateStateLocked()
 		c.state.unavailable = false
 		c.state.lastCredentialLoadAttempt = time.Now()
 		c.state.lastCredentialLoadError = ""
 		c.state.accountType = latestCredentials.SubscriptionType
 		c.state.rateLimitTier = latestCredentials.RateLimitTier
 		c.checkTransitionLocked()
+		isAvailable, newWeight := c.statusAggregateStateLocked()
+		shouldEmit := wasAvailable != isAvailable || oldWeight != newWeight
 		c.stateAccess.Unlock()
+		if shouldEmit {
+			c.emitStatusUpdate()
+		}
 		if !latestCredentials.needsRefresh() {
 			return latestCredentials.AccessToken, nil
 		}
@@ -201,13 +227,19 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 
 	c.credentials = newCredentials
 	c.stateAccess.Lock()
+	wasAvailable, oldWeight := c.statusAggregateStateLocked()
 	c.state.unavailable = false
 	c.state.lastCredentialLoadAttempt = time.Now()
 	c.state.lastCredentialLoadError = ""
 	c.state.accountType = newCredentials.SubscriptionType
 	c.state.rateLimitTier = newCredentials.RateLimitTier
 	c.checkTransitionLocked()
+	isAvailable, newWeight := c.statusAggregateStateLocked()
+	shouldEmit := wasAvailable != isAvailable || oldWeight != newWeight
 	c.stateAccess.Unlock()
+	if shouldEmit {
+		c.emitStatusUpdate()
+	}
 
 	err = platformWriteCredentials(newCredentials, c.credentialPath)
 	if err != nil {
@@ -277,6 +309,9 @@ func (c *defaultCredential) updateStateFromHeaders(headers http.Header) {
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
+	if hadData {
+		c.emitStatusUpdate()
+	}
 }
 
 func (c *defaultCredential) markRateLimited(resetAt time.Time) {
@@ -289,6 +324,7 @@ func (c *defaultCredential) markRateLimited(resetAt time.Time) {
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
+	c.emitStatusUpdate()
 }
 
 func (c *defaultCredential) isUsable() bool {
@@ -584,6 +620,7 @@ func (c *defaultCredential) pollUsage(ctx context.Context) {
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
+	c.emitStatusUpdate()
 
 	if needsProfileFetch {
 		c.fetchProfile(ctx, httpClient, accessToken)
@@ -636,6 +673,7 @@ func (c *defaultCredential) fetchProfile(ctx context.Context, httpClient *http.C
 	rateLimitTier := profileResponse.Organization.RateLimitTier
 
 	c.stateAccess.Lock()
+	wasAvailable, oldWeight := c.statusAggregateStateLocked()
 	if accountType != "" && c.state.accountType == "" {
 		c.state.accountType = accountType
 	}
@@ -643,7 +681,12 @@ func (c *defaultCredential) fetchProfile(ctx context.Context, httpClient *http.C
 		c.state.rateLimitTier = rateLimitTier
 	}
 	resolvedAccountType := c.state.accountType
+	isAvailable, newWeight := c.statusAggregateStateLocked()
+	shouldEmit := wasAvailable != isAvailable || oldWeight != newWeight
 	c.stateAccess.Unlock()
+	if shouldEmit {
+		c.emitStatusUpdate()
+	}
 	c.logger.Info("fetched profile for ", c.tag, ": type=", resolvedAccountType, ", tier=", rateLimitTier, ", weight=", ccmPlanWeight(resolvedAccountType, rateLimitTier))
 }
 
