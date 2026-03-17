@@ -460,6 +460,7 @@ func (c *externalCredential) updateStateFromHeaders(headers http.Header) {
 	isFirstUpdate := c.state.lastUpdated.IsZero()
 	oldFiveHour := c.state.fiveHourUtilization
 	oldWeekly := c.state.weeklyUtilization
+	oldPlanWeight := c.state.remotePlanWeight
 	hadData := false
 
 	activeLimitIdentifier := normalizeRateLimitIdentifier(headers.Get("x-codex-active-limit"))
@@ -517,12 +518,13 @@ func (c *externalCredential) updateStateFromHeaders(headers http.Header) {
 		}
 		c.logger.Debug("usage update for ", c.tag, ": 5h=", c.state.fiveHourUtilization, "%, weekly=", c.state.weeklyUtilization, "%", resetSuffix)
 	}
+	shouldEmit := hadData && (c.state.fiveHourUtilization != oldFiveHour || c.state.weeklyUtilization != oldWeekly || c.state.remotePlanWeight != oldPlanWeight)
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
-	if hadData {
+	if shouldEmit {
 		c.emitStatusUpdate()
 	}
 }
@@ -721,11 +723,7 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 	previousLastUpdated := c.lastUpdatedTime()
 	var firstFrameUpdatedAt time.Time
 	for {
-		var statusResponse struct {
-			FiveHourUtilization float64 `json:"five_hour_utilization"`
-			WeeklyUtilization   float64 `json:"weekly_utilization"`
-			PlanWeight          float64 `json:"plan_weight"`
-		}
+		var statusResponse statusPayload
 		err = decoder.Decode(&statusResponse)
 		if err != nil {
 			result.duration = time.Since(startTime)

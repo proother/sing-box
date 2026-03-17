@@ -152,11 +152,16 @@ func (c *defaultCredential) emitStatusUpdate() {
 	}
 }
 
-func (c *defaultCredential) statusAggregateStateLocked() (bool, float64) {
+type statusSnapshot struct {
+	available bool
+	weight    float64
+}
+
+func (c *defaultCredential) statusSnapshotLocked() statusSnapshot {
 	if c.state.unavailable {
-		return false, 0
+		return statusSnapshot{}
 	}
-	return true, ccmPlanWeight(c.state.accountType, c.state.rateLimitTier)
+	return statusSnapshot{true, ccmPlanWeight(c.state.accountType, c.state.rateLimitTier)}
 }
 
 func (c *defaultCredential) getAccessToken() (string, error) {
@@ -206,15 +211,14 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 	if latestErr == nil && !credentialsEqual(latestCredentials, baseCredentials) {
 		c.credentials = latestCredentials
 		c.stateAccess.Lock()
-		wasAvailable, oldWeight := c.statusAggregateStateLocked()
+		before := c.statusSnapshotLocked()
 		c.state.unavailable = false
 		c.state.lastCredentialLoadAttempt = time.Now()
 		c.state.lastCredentialLoadError = ""
 		c.state.accountType = latestCredentials.SubscriptionType
 		c.state.rateLimitTier = latestCredentials.RateLimitTier
 		c.checkTransitionLocked()
-		isAvailable, newWeight := c.statusAggregateStateLocked()
-		shouldEmit := wasAvailable != isAvailable || oldWeight != newWeight
+		shouldEmit := before != c.statusSnapshotLocked()
 		c.stateAccess.Unlock()
 		if shouldEmit {
 			c.emitStatusUpdate()
@@ -227,15 +231,14 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 
 	c.credentials = newCredentials
 	c.stateAccess.Lock()
-	wasAvailable, oldWeight := c.statusAggregateStateLocked()
+	before := c.statusSnapshotLocked()
 	c.state.unavailable = false
 	c.state.lastCredentialLoadAttempt = time.Now()
 	c.state.lastCredentialLoadError = ""
 	c.state.accountType = newCredentials.SubscriptionType
 	c.state.rateLimitTier = newCredentials.RateLimitTier
 	c.checkTransitionLocked()
-	isAvailable, newWeight := c.statusAggregateStateLocked()
-	shouldEmit := wasAvailable != isAvailable || oldWeight != newWeight
+	shouldEmit := before != c.statusSnapshotLocked()
 	c.stateAccess.Unlock()
 	if shouldEmit {
 		c.emitStatusUpdate()
@@ -304,12 +307,13 @@ func (c *defaultCredential) updateStateFromHeaders(headers http.Header) {
 		}
 		c.logger.Debug("usage update for ", c.tag, ": 5h=", c.state.fiveHourUtilization, "%, weekly=", c.state.weeklyUtilization, "%", resetSuffix)
 	}
+	shouldEmit := hadData && (c.state.fiveHourUtilization != oldFiveHour || c.state.weeklyUtilization != oldWeekly)
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
 	if shouldInterrupt {
 		c.interruptConnections()
 	}
-	if hadData {
+	if shouldEmit {
 		c.emitStatusUpdate()
 	}
 }
@@ -673,7 +677,7 @@ func (c *defaultCredential) fetchProfile(ctx context.Context, httpClient *http.C
 	rateLimitTier := profileResponse.Organization.RateLimitTier
 
 	c.stateAccess.Lock()
-	wasAvailable, oldWeight := c.statusAggregateStateLocked()
+	before := c.statusSnapshotLocked()
 	if accountType != "" && c.state.accountType == "" {
 		c.state.accountType = accountType
 	}
@@ -681,8 +685,7 @@ func (c *defaultCredential) fetchProfile(ctx context.Context, httpClient *http.C
 		c.state.rateLimitTier = rateLimitTier
 	}
 	resolvedAccountType := c.state.accountType
-	isAvailable, newWeight := c.statusAggregateStateLocked()
-	shouldEmit := wasAvailable != isAvailable || oldWeight != newWeight
+	shouldEmit := before != c.statusSnapshotLocked()
 	c.stateAccess.Unlock()
 	if shouldEmit {
 		c.emitStatusUpdate()

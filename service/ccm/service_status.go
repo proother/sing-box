@@ -10,6 +10,12 @@ import (
 	"github.com/sagernet/sing-box/option"
 )
 
+type statusPayload struct {
+	FiveHourUtilization float64 `json:"five_hour_utilization"`
+	WeeklyUtilization   float64 `json:"weekly_utilization"`
+	PlanWeight          float64 `json:"plan_weight"`
+}
+
 func (s *Service) handleStatusEndpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, r, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
@@ -66,10 +72,10 @@ func (s *Service) handleStatusEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]float64{
-		"five_hour_utilization": avgFiveHour,
-		"weekly_utilization":    avgWeekly,
-		"plan_weight":           totalWeight,
+	json.NewEncoder(w).Encode(statusPayload{
+		FiveHourUtilization: avgFiveHour,
+		WeeklyUtilization:   avgWeekly,
+		PlanWeight:          totalWeight,
 	})
 }
 
@@ -95,10 +101,10 @@ func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, pro
 
 	lastFiveHour, lastWeekly, lastWeight := s.computeAggregatedUtilization(provider, userConfig)
 	buf := &bytes.Buffer{}
-	json.NewEncoder(buf).Encode(map[string]float64{
-		"five_hour_utilization": lastFiveHour,
-		"weekly_utilization":    lastWeekly,
-		"plan_weight":           lastWeight,
+	json.NewEncoder(buf).Encode(statusPayload{
+		FiveHourUtilization: lastFiveHour,
+		WeeklyUtilization:   lastWeekly,
+		PlanWeight:          lastWeight,
 	})
 	_, writeErr := w.Write(buf.Bytes())
 	if writeErr != nil {
@@ -129,10 +135,10 @@ func (s *Service) handleStatusStream(w http.ResponseWriter, r *http.Request, pro
 			lastWeekly = weekly
 			lastWeight = weight
 			buf.Reset()
-			json.NewEncoder(buf).Encode(map[string]float64{
-				"five_hour_utilization": fiveHour,
-				"weekly_utilization":    weekly,
-				"plan_weight":           weight,
+			json.NewEncoder(buf).Encode(statusPayload{
+				FiveHourUtilization: fiveHour,
+				WeeklyUtilization:   weekly,
+				PlanWeight:          weight,
 			})
 			_, writeErr = w.Write(buf.Bytes())
 			if writeErr != nil {
