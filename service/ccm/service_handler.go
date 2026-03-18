@@ -302,6 +302,18 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	selectedCredential.updateStateFromHeaders(response.Header)
 
+	if response.StatusCode == 529 {
+		s.logger.WarnContext(ctx, "upstream overloaded from ", selectedCredential.tagName())
+		for key, values := range response.Header {
+			if !isHopByHopHeader(key) && !isReverseProxyHeader(key) {
+				w.Header()[key] = values
+			}
+		}
+		w.WriteHeader(response.StatusCode)
+		io.Copy(w, response.Body)
+		return
+	}
+
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusTooManyRequests {
 		body, _ := io.ReadAll(response.Body)
 		s.logger.ErrorContext(ctx, "upstream error from ", selectedCredential.tagName(), ": status ", response.StatusCode, " ", string(body))
