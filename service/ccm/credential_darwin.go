@@ -76,41 +76,65 @@ func platformCanWriteCredentials(customPath string) error {
 	return checkCredentialFileWritable(customPath)
 }
 
-func platformWriteCredentials(oauthCredentials *oauthCredentials, customPath string) error {
+// platformWriteCredentials performs a read-modify-write on the keychain entry,
+// preserving any fields or top-level keys not managed by CCM.
+//
+// ref (@anthropic-ai/claude-code @2.1.81): cli.js BP6 (line 179444-179454) — read-modify-write
+func platformWriteCredentials(credentials *oauthCredentials, customPath string) error {
 	if customPath != "" {
-		return writeCredentialsToFile(oauthCredentials, customPath)
+		return writeCredentialsToFile(credentials, customPath)
 	}
 
 	userInfo, err := getRealUser()
 	if err == nil {
-		data, err := json.Marshal(map[string]any{"claudeAiOauth": oauthCredentials})
+		serviceName := getKeychainServiceName()
+
+		existing := make(map[string]json.RawMessage)
+		query := keychain.NewItem()
+		query.SetSecClass(keychain.SecClassGenericPassword)
+		query.SetService(serviceName)
+		query.SetAccount(userInfo.Username)
+		query.SetMatchLimit(keychain.MatchLimitOne)
+		query.SetReturnData(true)
+		results, queryErr := keychain.QueryItem(query)
+		if queryErr == nil && len(results) == 1 {
+			_ = json.Unmarshal(results[0].Data, &existing)
+		}
+
+		credentialData, err := json.Marshal(credentials)
+		if err != nil {
+			return E.Cause(err, "marshal credentials")
+		}
+		existing["claudeAiOauth"] = credentialData
+		data, err := json.Marshal(existing)
+		if err != nil {
+			return E.Cause(err, "marshal credential container")
+		}
+
+		item := keychain.NewItem()
+		item.SetSecClass(keychain.SecClassGenericPassword)
+		item.SetService(serviceName)
+		item.SetAccount(userInfo.Username)
+		item.SetData(data)
+		item.SetAccessible(keychain.AccessibleWhenUnlocked)
+
+		err = keychain.AddItem(item)
 		if err == nil {
-			serviceName := getKeychainServiceName()
-			item := keychain.NewItem()
-			item.SetSecClass(keychain.SecClassGenericPassword)
-			item.SetService(serviceName)
-			item.SetAccount(userInfo.Username)
-			item.SetData(data)
-			item.SetAccessible(keychain.AccessibleWhenUnlocked)
+			return nil
+		}
 
-			err = keychain.AddItem(item)
-			if err == nil {
+		if err == keychain.ErrorDuplicateItem {
+			updateQuery := keychain.NewItem()
+			updateQuery.SetSecClass(keychain.SecClassGenericPassword)
+			updateQuery.SetService(serviceName)
+			updateQuery.SetAccount(userInfo.Username)
+
+			updateItem := keychain.NewItem()
+			updateItem.SetData(data)
+
+			updateErr := keychain.UpdateItem(updateQuery, updateItem)
+			if updateErr == nil {
 				return nil
-			}
-
-			if err == keychain.ErrorDuplicateItem {
-				query := keychain.NewItem()
-				query.SetSecClass(keychain.SecClassGenericPassword)
-				query.SetService(serviceName)
-				query.SetAccount(userInfo.Username)
-
-				updateItem := keychain.NewItem()
-				updateItem.SetData(data)
-
-				updateErr := keychain.UpdateItem(query, updateItem)
-				if updateErr == nil {
-					return nil
-				}
 			}
 		}
 	}
@@ -119,5 +143,5 @@ func platformWriteCredentials(oauthCredentials *oauthCredentials, customPath str
 	if err != nil {
 		return err
 	}
-	return writeCredentialsToFile(oauthCredentials, defaultPath)
+	return writeCredentialsToFile(credentials, defaultPath)
 }

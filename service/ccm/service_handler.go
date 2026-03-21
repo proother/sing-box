@@ -372,6 +372,43 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ref (@anthropic-ai/claude-code @2.1.81): cli.js NA9 (line 179488-179494) — 401 recovery
+	// ref: cli.js CR1 (line 314268-314273) — 403 "OAuth token has been revoked" recovery
+	if !selectedCredential.isExternal() && bodyBytes != nil &&
+		(response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+		shouldRetry := response.StatusCode == http.StatusUnauthorized
+		if response.StatusCode == http.StatusForbidden {
+			peekBody, _ := io.ReadAll(response.Body)
+			shouldRetry = strings.Contains(string(peekBody), "OAuth token has been revoked")
+			if !shouldRetry {
+				response.Body.Close()
+				s.logger.ErrorContext(ctx, "upstream error from ", selectedCredential.tagName(), ": status ", response.StatusCode, " ", string(peekBody))
+				writeJSONError(w, r, http.StatusInternalServerError, "api_error",
+					"proxy request (status "+strconv.Itoa(response.StatusCode)+"): "+string(peekBody))
+				return
+			}
+		}
+		if shouldRetry {
+			response.Body.Close()
+			s.logger.WarnContext(ctx, "upstream auth failure from ", selectedCredential.tagName(), ", reloading credentials and retrying")
+			if defaultCred, ok := selectedCredential.(*defaultCredential); ok {
+				_ = defaultCred.reloadCredentials(true)
+			}
+			retryRequest, buildErr := selectedCredential.buildProxyRequest(requestContext, r, bodyBytes, s.httpHeaders)
+			if buildErr != nil {
+				writeJSONError(w, r, http.StatusBadGateway, "api_error", E.Cause(buildErr, "rebuild request after auth recovery").Error())
+				return
+			}
+			retryResponse, retryErr := selectedCredential.httpClient().Do(retryRequest)
+			if retryErr != nil {
+				writeJSONError(w, r, http.StatusBadGateway, "api_error", E.Cause(retryErr, "retry request after auth recovery").Error())
+				return
+			}
+			response = retryResponse
+			defer retryResponse.Body.Close()
+		}
+	}
+
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusTooManyRequests {
 		body, _ := io.ReadAll(response.Body)
 		s.logger.ErrorContext(ctx, "upstream error from ", selectedCredential.tagName(), ": status ", response.StatusCode, " ", string(body))

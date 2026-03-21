@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ type defaultCredential struct {
 	serviceContext     context.Context
 	credentialPath     string
 	credentialFilePath string
+	configDir          string
 	statePath          string
 	credentials        *oauthCredentials
 	access             sync.RWMutex
@@ -132,6 +134,7 @@ func (c *defaultCredential) start() error {
 		return E.Cause(err, "resolve credential path for ", c.tag)
 	}
 	c.credentialFilePath = credentialFilePath
+	c.configDir = resolveConfigDir(c.credentialPath, credentialFilePath)
 	c.loadPersistedState()
 	err = c.ensureCredentialWatcher()
 	if err != nil {
@@ -176,6 +179,7 @@ func (c *defaultCredential) statusSnapshotLocked() statusSnapshot {
 func (c *defaultCredential) getAccessToken() (string, error) {
 	c.retryCredentialReloadIfNeeded()
 
+	// Fast path: cached token is still valid
 	c.access.RLock()
 	if c.credentials != nil && !c.credentials.needsRefresh() {
 		token := c.credentials.AccessToken
@@ -184,6 +188,7 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 	}
 	c.access.RUnlock()
 
+	// Reload from disk — Claude Code or another process may have refreshed
 	err := c.reloadCredentials(true)
 	if err == nil {
 		c.access.RLock()
@@ -195,6 +200,41 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 		c.access.RUnlock()
 	}
 
+	// ref (@anthropic-ai/claude-code @2.1.81): cli.js _P1 line 179526
+	// Claude Code skips refresh for tokens without user:inference scope.
+	// Return existing token (may be expired); 401 recovery is the safety net.
+	c.access.RLock()
+	if c.credentials != nil && !slices.Contains(c.credentials.Scopes, "user:inference") {
+		token := c.credentials.AccessToken
+		c.access.RUnlock()
+		return token, nil
+	}
+	c.access.RUnlock()
+
+	// Acquire cross-process lock before refresh (outside Go mutex to avoid holding mutex during sleep)
+	// ref: cli.js _P1 (line 179534-179536) — proper-lockfile lock on config dir
+	release, lockErr := acquireCredentialLock(c.configDir)
+	if lockErr != nil {
+		c.logger.Debug("acquire credential lock for ", c.tag, ": ", lockErr)
+		release = func() {}
+	}
+	defer release()
+
+	// ref: cli.js _P1 (line 179559-179562) — re-read after lock, skip if race resolved
+	_ = c.reloadCredentials(true)
+	c.access.RLock()
+	noRefreshToken := c.credentials == nil || c.credentials.RefreshToken == ""
+	raceResolved := !noRefreshToken && !c.credentials.needsRefresh()
+	var racedToken string
+	if (noRefreshToken || raceResolved) && c.credentials != nil {
+		racedToken = c.credentials.AccessToken
+	}
+	c.access.RUnlock()
+	if noRefreshToken || raceResolved {
+		return racedToken, nil
+	}
+
+	// Slow path: acquire Go mutex and refresh
 	c.access.Lock()
 	defer c.access.Unlock()
 
@@ -226,6 +266,14 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 		} else if retryDelay > 0 {
 			c.refreshRetryAt = time.Now().Add(retryDelay)
 			c.refreshRetryError = err
+		}
+		// ref: cli.js _P1 (line 179568-179573) — post-failure recovery:
+		// re-read from disk; if another process refreshed successfully, use that.
+		// Cannot call reloadCredentials here (deadlock: already holding c.access).
+		latestCredentials, readErr := platformReadCredentials(c.credentialPath)
+		if readErr == nil && latestCredentials != nil && !latestCredentials.needsRefresh() {
+			c.credentials = latestCredentials
+			return latestCredentials.AccessToken, nil
 		}
 		return "", err
 	}

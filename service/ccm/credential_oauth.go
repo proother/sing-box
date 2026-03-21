@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,9 +24,31 @@ const (
 	oauth2ClientID          = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	oauth2TokenURL          = "https://platform.claude.com/v1/oauth/token"
 	claudeAPIBaseURL        = "https://api.anthropic.com"
-	tokenRefreshBufferMs    = 60000
 	anthropicBetaOAuthValue = "oauth-2025-04-20"
+
+	// ref (@anthropic-ai/claude-code @2.1.81): cli.js vB (line 172879)
+	tokenRefreshBufferMs = 300000
 )
+
+// ref (@anthropic-ai/claude-code @2.1.81): cli.js q78 (line 33167)
+// These scopes may change across Claude Code versions.
+var defaultOAuthScopes = []string{
+	"user:profile", "user:inference", "user:sessions:claude_code",
+	"user:mcp_servers", "user:file_upload",
+}
+
+// resolveRefreshScopes determines which scopes to send in the token refresh request.
+//
+// ref (@anthropic-ai/claude-code @2.1.81): cli.js NR() (line 172693) + mB6 scope logic (line 172761)
+//
+// Claude Code behavior: if stored scopes include "user:inference", send default
+// scopes; otherwise send the stored scopes verbatim.
+func resolveRefreshScopes(stored []string) string {
+	if len(stored) == 0 || slices.Contains(stored, "user:inference") {
+		return strings.Join(defaultOAuthScopes, " ")
+	}
+	return strings.Join(stored, " ")
+}
 
 const ccmUserAgentFallback = "claude-code/2.1.72"
 
@@ -69,6 +92,22 @@ func detectClaudeCodeVersion() (string, error) {
 		return "", E.New("unexpected symlink target: ", target)
 	}
 	return filepath.Base(target), nil
+}
+
+// resolveConfigDir returns the Claude config directory for lock coordination.
+//
+// ref (@anthropic-ai/claude-code @2.1.81): cli.js d1() (line 2983) — config dir used for locking
+func resolveConfigDir(credentialPath string, credentialFilePath string) string {
+	if credentialPath == "" {
+		if configDir := os.Getenv("CLAUDE_CONFIG_DIR"); configDir != "" {
+			return configDir
+		}
+		userInfo, err := getRealUser()
+		if err == nil {
+			return filepath.Join(userInfo.HomeDir, ".claude")
+		}
+	}
+	return filepath.Dir(credentialFilePath)
 }
 
 func getRealUser() (*user.User, error) {
@@ -118,10 +157,24 @@ func checkCredentialFileWritable(path string) error {
 	return file.Close()
 }
 
-func writeCredentialsToFile(oauthCredentials *oauthCredentials, path string) error {
-	data, err := json.MarshalIndent(map[string]any{
-		"claudeAiOauth": oauthCredentials,
-	}, "", "  ")
+// writeCredentialsToFile performs a read-modify-write: reads the existing JSON,
+// replaces only the claudeAiOauth key, and writes back. This preserves any
+// other top-level keys in the credential file.
+//
+// ref (@anthropic-ai/claude-code @2.1.81): cli.js BP6 (line 179444-179454) — read-modify-write
+// ref: cli.js qD1.update (line 176156) — writeFileSync + chmod 0o600
+func writeCredentialsToFile(credentials *oauthCredentials, path string) error {
+	existing := make(map[string]json.RawMessage)
+	data, readErr := os.ReadFile(path)
+	if readErr == nil {
+		_ = json.Unmarshal(data, &existing)
+	}
+	credentialData, err := json.Marshal(credentials)
+	if err != nil {
+		return err
+	}
+	existing["claudeAiOauth"] = credentialData
+	data, err = json.MarshalIndent(existing, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -131,16 +184,14 @@ func writeCredentialsToFile(oauthCredentials *oauthCredentials, path string) err
 // oauthCredentials mirrors the claudeAiOauth object in Claude Code's
 // credential file ($CLAUDE_CONFIG_DIR/.credentials.json).
 //
-// ref (@anthropic-ai/claude-code @2.1.81): cli.js mB6() / refreshOAuthToken
-//
-// Note: subscriptionType, rateLimitTier, and isMax were removed from this
-// struct — they are profile state, not auth credentials. Claude Code also
-// stores them here, but we persist them separately via state_path instead.
+// ref (@anthropic-ai/claude-code @2.1.81): cli.js BP6 (line 179446-179452)
 type oauthCredentials struct {
-	AccessToken  string   `json:"accessToken"`
-	RefreshToken string   `json:"refreshToken"`
-	ExpiresAt    int64    `json:"expiresAt"`
-	Scopes       []string `json:"scopes,omitempty"`
+	AccessToken      string   `json:"accessToken"`      // ref: cli.js line 179447
+	RefreshToken     string   `json:"refreshToken"`     // ref: cli.js line 179448
+	ExpiresAt        int64    `json:"expiresAt"`        // ref: cli.js line 179449 (epoch ms)
+	Scopes           []string `json:"scopes"`           // ref: cli.js line 179450
+	SubscriptionType *string  `json:"subscriptionType"` // ref: cli.js line 179451 (?? null)
+	RateLimitTier    *string  `json:"rateLimitTier"`    // ref: cli.js line 179452 (?? null)
 }
 
 func (c *oauthCredentials) needsRefresh() bool {
@@ -155,10 +206,12 @@ func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oau
 		return nil, 0, E.New("refresh token is empty")
 	}
 
+	// ref (@anthropic-ai/claude-code @2.1.81): cli.js mB6 (line 172757-172761)
 	requestBody, err := json.Marshal(map[string]string{
 		"grant_type":    "refresh_token",
 		"refresh_token": credentials.RefreshToken,
 		"client_id":     oauth2ClientID,
+		"scope":         resolveRefreshScopes(credentials.Scopes),
 	})
 	if err != nil {
 		return nil, 0, E.Cause(err, "marshal request")
@@ -194,10 +247,12 @@ func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oau
 		return nil, 0, E.New("refresh failed: ", response.Status, " ", string(body))
 	}
 
+	// ref (@anthropic-ai/claude-code @2.1.81): cli.js mB6 response (line 172769-172772)
 	var tokenResponse struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int    `json:"expires_in"`
+		AccessToken  string `json:"access_token"`  // ref: cli.js line 172770 z
+		RefreshToken string `json:"refresh_token"` // ref: cli.js line 172770 w (defaults to input)
+		ExpiresIn    int    `json:"expires_in"`    // ref: cli.js line 172770 O
+		Scope        string `json:"scope"`         // ref: cli.js line 172772 uB6(Y.scope)
 	}
 	err = json.NewDecoder(response.Body).Decode(&tokenResponse)
 	if err != nil {
@@ -210,6 +265,11 @@ func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oau
 		newCredentials.RefreshToken = tokenResponse.RefreshToken
 	}
 	newCredentials.ExpiresAt = time.Now().UnixMilli() + int64(tokenResponse.ExpiresIn)*1000
+	// ref: cli.js uB6 (line 172696-172697): A?.split(" ").filter(Boolean)
+	// strings.Fields matches .filter(Boolean): splits on whitespace runs, removes empty strings
+	if tokenResponse.Scope != "" {
+		newCredentials.Scopes = strings.Fields(tokenResponse.Scope)
+	}
 
 	return &newCredentials, 0, nil
 }
