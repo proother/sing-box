@@ -264,6 +264,12 @@ func (s *Service) handleWebSocket(
 			selectedCredential = nextCredential
 			continue
 		}
+		if statusCode == http.StatusBadRequest && selectedCredential.isExternal() {
+			selectedCredential.markUpstreamRejected()
+			s.logger.ErrorContext(ctx, "upstream rejected websocket from ", selectedCredential.tagName(), ": status ", statusCode)
+			writeCredentialUnavailableError(w, r, provider, selectedCredential, selection, "upstream rejected credential")
+			return
+		}
 		if statusCode > 0 && statusResponseBody != "" {
 			s.logger.ErrorContext(ctx, "dial upstream websocket: status ", statusCode, " body: ", statusResponseBody)
 		} else {

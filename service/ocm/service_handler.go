@@ -282,6 +282,17 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	selectedCredential.updateStateFromHeaders(response.Header)
 
+	if response.StatusCode == http.StatusBadRequest {
+		if selectedCredential.isExternal() {
+			selectedCredential.markUpstreamRejected()
+		} else {
+			provider.pollCredentialIfStale(selectedCredential)
+		}
+		s.logger.ErrorContext(ctx, "upstream rejected from ", selectedCredential.tagName(), ": status ", response.StatusCode)
+		writeCredentialUnavailableError(w, r, provider, selectedCredential, selection, "upstream rejected credential")
+		return
+	}
+
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusTooManyRequests {
 		body, _ := io.ReadAll(response.Body)
 		s.logger.ErrorContext(ctx, "upstream error from ", selectedCredential.tagName(), ": status ", response.StatusCode, " ", string(body))

@@ -298,6 +298,10 @@ func (c *externalCredential) isUsable() bool {
 		c.stateAccess.RUnlock()
 		return false
 	}
+	if !c.state.upstreamRejectedUntil.IsZero() && time.Now().Before(c.state.upstreamRejectedUntil) {
+		c.stateAccess.RUnlock()
+		return false
+	}
 	if c.state.hardRateLimited {
 		if time.Now().Before(c.state.rateLimitResetAt) {
 			c.stateAccess.RUnlock()
@@ -363,6 +367,18 @@ func (c *externalCredential) markRateLimited(resetAt time.Time) {
 	c.stateAccess.Lock()
 	c.state.hardRateLimited = true
 	c.state.rateLimitResetAt = resetAt
+	shouldInterrupt := c.checkTransitionLocked()
+	c.stateAccess.Unlock()
+	if shouldInterrupt {
+		c.interruptConnections()
+	}
+	c.emitStatusUpdate()
+}
+
+func (c *externalCredential) markUpstreamRejected() {
+	c.logger.Warn("upstream rejected credential ", c.tag, ", marking unavailable for ", log.FormatDuration(c.pollInterval))
+	c.stateAccess.Lock()
+	c.state.upstreamRejectedUntil = time.Now().Add(c.pollInterval)
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
 	if shouldInterrupt {
@@ -514,6 +530,7 @@ func (c *externalCredential) updateStateFromHeaders(headers http.Header) {
 	}
 	if hadData {
 		c.state.consecutivePollFailures = 0
+		c.state.upstreamRejectedUntil = time.Time{}
 		c.state.lastUpdated = time.Now()
 	}
 	if isFirstUpdate || int(c.state.fiveHourUtilization*100) != int(oldFiveHour*100) || int(c.state.weeklyUtilization*100) != int(oldWeekly*100) {
@@ -538,7 +555,8 @@ func (c *externalCredential) updateStateFromHeaders(headers http.Header) {
 }
 
 func (c *externalCredential) checkTransitionLocked() bool {
-	unusable := c.state.hardRateLimited || c.state.fiveHourUtilization >= 100 || c.state.weeklyUtilization >= 100 || c.state.consecutivePollFailures > 0
+	upstreamRejected := !c.state.upstreamRejectedUntil.IsZero() && time.Now().Before(c.state.upstreamRejectedUntil)
+	unusable := c.state.hardRateLimited || c.state.fiveHourUtilization >= 100 || c.state.weeklyUtilization >= 100 || c.state.consecutivePollFailures > 0 || upstreamRejected
 	if unusable && !c.interrupted {
 		c.interrupted = true
 		return true
@@ -678,6 +696,7 @@ func (c *externalCredential) pollUsage() {
 	oldFiveHour := c.state.fiveHourUtilization
 	oldWeekly := c.state.weeklyUtilization
 	c.state.consecutivePollFailures = 0
+	c.state.upstreamRejectedUntil = time.Time{}
 	c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
 	c.state.weeklyUtilization = statusResponse.WeeklyUtilization
 	if statusResponse.FiveHourReset > 0 {
@@ -786,6 +805,7 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 		oldFiveHour := c.state.fiveHourUtilization
 		oldWeekly := c.state.weeklyUtilization
 		c.state.consecutivePollFailures = 0
+		c.state.upstreamRejectedUntil = time.Time{}
 		c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
 		c.state.weeklyUtilization = statusResponse.WeeklyUtilization
 		if statusResponse.FiveHourReset > 0 {

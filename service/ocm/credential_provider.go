@@ -17,6 +17,7 @@ type credentialProvider interface {
 	onRateLimited(sessionID string, credential Credential, resetAt time.Time, selection credentialSelection) Credential
 	linkProviderInterrupt(credential Credential, selection credentialSelection, onInterrupt func()) func() bool
 	pollIfStale()
+	pollCredentialIfStale(credential Credential)
 	allCredentials() []Credential
 	close()
 }
@@ -80,6 +81,12 @@ func (p *singleCredentialProvider) allCredentials() []Credential {
 func (p *singleCredentialProvider) linkProviderInterrupt(_ Credential, _ credentialSelection, _ func()) func() bool {
 	return func() bool {
 		return false
+	}
+}
+
+func (p *singleCredentialProvider) pollCredentialIfStale(credential Credential) {
+	if time.Since(credential.lastUpdatedTime()) > credential.pollBackoff(defaultPollInterval) {
+		credential.pollUsage()
 	}
 }
 
@@ -406,6 +413,12 @@ func (p *balancerProvider) pollIfStale() {
 		if time.Since(credential.lastUpdatedTime()) > credential.pollBackoff(p.pollInterval) {
 			credential.pollUsage()
 		}
+	}
+}
+
+func (p *balancerProvider) pollCredentialIfStale(credential Credential) {
+	if time.Since(credential.lastUpdatedTime()) > credential.pollBackoff(p.pollInterval) {
+		credential.pollUsage()
 	}
 }
 

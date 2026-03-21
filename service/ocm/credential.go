@@ -67,6 +67,7 @@ type credentialState struct {
 	consecutivePollFailures   int
 	usageAPIRetryDelay        time.Duration
 	unavailable               bool
+	upstreamRejectedUntil     time.Time
 	lastCredentialLoadAttempt time.Time
 	lastCredentialLoadError   string
 }
@@ -109,6 +110,7 @@ type Credential interface {
 	weeklyResetTime() time.Time
 	fiveHourResetTime() time.Time
 	markRateLimited(resetAt time.Time)
+	markUpstreamRejected()
 	earliestReset() time.Time
 	unavailableError() error
 

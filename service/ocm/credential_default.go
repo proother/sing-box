@@ -394,6 +394,8 @@ func (c *defaultCredential) markRateLimited(resetAt time.Time) {
 	c.emitStatusUpdate()
 }
 
+func (c *defaultCredential) markUpstreamRejected() {}
+
 func (c *defaultCredential) isUsable() bool {
 	c.retryCredentialReloadIfNeeded()
 
