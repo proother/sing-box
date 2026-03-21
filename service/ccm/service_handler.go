@@ -82,15 +82,21 @@ func extractWeeklyCycleHint(headers http.Header) *WeeklyCycleHint {
 //	`user_${deviceId}_account_${accountUuid}_session_${sessionId}`
 //
 // ref: cli.js qs() — old metadata constructor
-func extractCCMSessionID(bodyBytes []byte) string {
+//
+// Returns ("", nil) when body has no metadata.user_id (non-message endpoints).
+// Returns error when user_id is present but in an unrecognized format.
+func extractCCMSessionID(bodyBytes []byte) (string, error) {
 	var body struct {
-		Metadata struct {
+		Metadata *struct {
 			UserID string `json:"user_id"`
 		} `json:"metadata"`
 	}
 	err := json.Unmarshal(bodyBytes, &body)
 	if err != nil {
-		return ""
+		return "", nil
+	}
+	if body.Metadata == nil || body.Metadata.UserID == "" {
+		return "", nil
 	}
 	userID := body.Metadata.UserID
 
@@ -99,15 +105,16 @@ func extractCCMSessionID(bodyBytes []byte) string {
 		SessionID string `json:"session_id"`
 	}
 	if json.Unmarshal([]byte(userID), &userIDObject) == nil && userIDObject.SessionID != "" {
-		return userIDObject.SessionID
+		return userIDObject.SessionID, nil
 	}
 
 	// legacy template literal format
 	sessionIndex := strings.LastIndex(userID, "_session_")
-	if sessionIndex < 0 {
-		return ""
+	if sessionIndex >= 0 {
+		return userID[sessionIndex+len("_session_"):], nil
 	}
-	return userID[sessionIndex+len("_session_"):]
+
+	return "", E.New("unrecognized metadata.user_id format: ", userID)
 }
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +188,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			messagesCount = len(request.Messages)
 		}
 
-		sessionID = extractCCMSessionID(bodyBytes)
+		sessionID, err = extractCCMSessionID(bodyBytes)
+		if err != nil {
+			s.logger.ErrorContext(ctx, "invalid metadata format: ", err)
+			writeJSONError(w, r, http.StatusInternalServerError, "api_error", "invalid metadata format")
+			return
+		}
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 

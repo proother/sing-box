@@ -851,37 +851,71 @@ func (c *defaultCredential) injectAccountUUID(bodyBytes []byte) []byte {
 		return bodyBytes
 	}
 
-	var body struct {
-		Metadata struct {
-			UserID string `json:"user_id"`
-		} `json:"metadata"`
+	var body map[string]json.RawMessage
+	err := json.Unmarshal(bodyBytes, &body)
+	if err != nil {
+		return bodyBytes
 	}
-	if json.Unmarshal(bodyBytes, &body) != nil || body.Metadata.UserID == "" {
+	metadataRaw, hasMetadata := body["metadata"]
+	if !hasMetadata {
 		return bodyBytes
 	}
 
-	var userIDObject map[string]any
-	if json.Unmarshal([]byte(body.Metadata.UserID), &userIDObject) != nil {
+	var metadata map[string]json.RawMessage
+	err = json.Unmarshal(metadataRaw, &metadata)
+	if err != nil {
 		return bodyBytes
 	}
-	existing, _ := userIDObject["account_uuid"].(string)
-	if existing != "" {
+	userIDRaw, hasUserID := metadata["user_id"]
+	if !hasUserID {
 		return bodyBytes
 	}
-	userIDObject["account_uuid"] = accountUUID
-	newUserID, err := json.Marshal(userIDObject)
+
+	var userIDStr string
+	err = json.Unmarshal(userIDRaw, &userIDStr)
+	if err != nil || userIDStr == "" {
+		return bodyBytes
+	}
+
+	var userIDObject map[string]json.RawMessage
+	err = json.Unmarshal([]byte(userIDStr), &userIDObject)
 	if err != nil {
 		return bodyBytes
 	}
 
-	newUserIDStr := string(newUserID)
-	oldUserIDJSON, err := json.Marshal(body.Metadata.UserID)
+	existingRaw, hasExisting := userIDObject["account_uuid"]
+	if hasExisting {
+		var existing string
+		if json.Unmarshal(existingRaw, &existing) == nil && existing != "" {
+			return bodyBytes
+		}
+	}
+
+	accountUUIDJSON, err := json.Marshal(accountUUID)
 	if err != nil {
 		return bodyBytes
 	}
-	newUserIDJSON, err := json.Marshal(newUserIDStr)
+	userIDObject["account_uuid"] = json.RawMessage(accountUUIDJSON)
+
+	newUserIDBytes, err := json.Marshal(userIDObject)
 	if err != nil {
 		return bodyBytes
 	}
-	return bytes.Replace(bodyBytes, oldUserIDJSON, newUserIDJSON, 1)
+	newUserIDRaw, err := json.Marshal(string(newUserIDBytes))
+	if err != nil {
+		return bodyBytes
+	}
+	metadata["user_id"] = json.RawMessage(newUserIDRaw)
+
+	newMetadataBytes, err := json.Marshal(metadata)
+	if err != nil {
+		return bodyBytes
+	}
+	body["metadata"] = json.RawMessage(newMetadataBytes)
+
+	newBodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return bodyBytes
+	}
+	return newBodyBytes
 }
