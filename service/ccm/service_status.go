@@ -176,7 +176,7 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 	var totalWeightedHoursUntil5hReset, total5hResetWeight float64
 	var totalWeightedHoursUntilWeeklyReset, totalWeeklyResetWeight float64
 	for _, credential := range provider.allCredentials() {
-		if !credential.isAvailable() {
+		if !credential.isUsable() {
 			continue
 		}
 		if userConfig != nil && userConfig.ExternalCredential != "" && credential.tagName() == userConfig.ExternalCredential {
