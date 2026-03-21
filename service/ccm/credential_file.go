@@ -108,6 +108,9 @@ func (c *defaultCredential) reloadCredentials(force bool) error {
 
 	c.access.Lock()
 	c.credentials = credentials
+	c.refreshRetryAt = time.Time{}
+	c.refreshRetryError = nil
+	c.refreshBlocked = false
 	c.access.Unlock()
 
 	c.stateAccess.Lock()

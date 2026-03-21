@@ -46,6 +46,11 @@ type defaultCredential struct {
 
 	statusSubscriber *observable.Subscriber[struct{}]
 
+	// Refresh rate-limit cooldown (protected by access mutex)
+	refreshRetryAt    time.Time
+	refreshRetryError error
+	refreshBlocked    bool
+
 	// Connection interruption
 	interrupted    bool
 	requestContext context.Context
@@ -197,16 +202,33 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 		return c.credentials.AccessToken, nil
 	}
 
+	if c.refreshBlocked {
+		return "", c.refreshRetryError
+	}
+	if !c.refreshRetryAt.IsZero() && time.Now().Before(c.refreshRetryAt) {
+		return "", c.refreshRetryError
+	}
+
 	err = platformCanWriteCredentials(c.credentialPath)
 	if err != nil {
 		return "", E.Cause(err, "credential file not writable, refusing refresh to avoid invalidation")
 	}
 
 	baseCredentials := cloneCredentials(c.credentials)
-	newCredentials, err := refreshToken(c.serviceContext, c.forwardHTTPClient, c.credentials)
+	newCredentials, retryDelay, err := refreshToken(c.serviceContext, c.forwardHTTPClient, c.credentials)
 	if err != nil {
+		if retryDelay < 0 {
+			c.refreshBlocked = true
+			c.refreshRetryError = err
+		} else if retryDelay > 0 {
+			c.refreshRetryAt = time.Now().Add(retryDelay)
+			c.refreshRetryError = err
+		}
 		return "", err
 	}
+	c.refreshRetryAt = time.Time{}
+	c.refreshRetryError = nil
+	c.refreshBlocked = false
 
 	latestCredentials, latestErr := platformReadCredentials(c.credentialPath)
 	if latestErr == nil && !credentialsEqual(latestCredentials, baseCredentials) {

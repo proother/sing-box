@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -119,9 +120,9 @@ func (c *oauthCredentials) needsRefresh() bool {
 	return time.Since(*c.LastRefresh) >= time.Duration(tokenRefreshIntervalDays)*24*time.Hour
 }
 
-func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oauthCredentials) (*oauthCredentials, error) {
+func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oauthCredentials) (*oauthCredentials, time.Duration, error) {
 	if credentials.Tokens == nil || credentials.Tokens.RefreshToken == "" {
-		return nil, E.New("refresh token is empty")
+		return nil, 0, E.New("refresh token is empty")
 	}
 
 	requestBody, err := json.Marshal(map[string]string{
@@ -131,7 +132,7 @@ func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oau
 		"scope":         "openid profile email",
 	})
 	if err != nil {
-		return nil, E.Cause(err, "marshal request")
+		return nil, 0, E.Cause(err, "marshal request")
 	}
 
 	response, err := doHTTPWithRetry(ctx, httpClient, func() (*http.Request, error) {
@@ -144,17 +145,24 @@ func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oau
 		return request, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode == http.StatusTooManyRequests {
 		body, _ := io.ReadAll(response.Body)
-		return nil, E.New("refresh rate limited: ", response.Status, " ", string(body))
+		retryDelay := time.Duration(-1)
+		if retryAfter := response.Header.Get("Retry-After"); retryAfter != "" {
+			seconds, parseErr := strconv.ParseInt(retryAfter, 10, 64)
+			if parseErr == nil && seconds > 0 {
+				retryDelay = time.Duration(seconds) * time.Second
+			}
+		}
+		return nil, retryDelay, E.New("refresh rate limited: ", response.Status, " ", string(body))
 	}
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
-		return nil, E.New("refresh failed: ", response.Status, " ", string(body))
+		return nil, 0, E.New("refresh failed: ", response.Status, " ", string(body))
 	}
 
 	var tokenResponse struct {
@@ -164,7 +172,7 @@ func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oau
 	}
 	err = json.NewDecoder(response.Body).Decode(&tokenResponse)
 	if err != nil {
-		return nil, E.Cause(err, "decode response")
+		return nil, 0, E.Cause(err, "decode response")
 	}
 
 	newCredentials := *credentials
@@ -183,7 +191,7 @@ func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oau
 	now := time.Now()
 	newCredentials.LastRefresh = &now
 
-	return &newCredentials, nil
+	return &newCredentials, 0, nil
 }
 
 func cloneCredentials(credentials *oauthCredentials) *oauthCredentials {
