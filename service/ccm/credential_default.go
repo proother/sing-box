@@ -29,6 +29,7 @@ type defaultCredential struct {
 	serviceContext     context.Context
 	credentialPath     string
 	credentialFilePath string
+	statePath          string
 	credentials        *oauthCredentials
 	access             sync.RWMutex
 	state              credentialState
@@ -106,6 +107,7 @@ func newDefaultCredential(ctx context.Context, tag string, options option.CCMDef
 		tag:               tag,
 		serviceContext:    ctx,
 		credentialPath:    options.CredentialPath,
+		statePath:         options.StatePath,
 		cap5h:             cap5h,
 		capWeekly:         capWeekly,
 		forwardHTTPClient: httpClient,
@@ -130,6 +132,7 @@ func (c *defaultCredential) start() error {
 		return E.Cause(err, "resolve credential path for ", c.tag)
 	}
 	c.credentialFilePath = credentialFilePath
+	c.loadPersistedState()
 	err = c.ensureCredentialWatcher()
 	if err != nil {
 		c.logger.Debug("start credential watcher for ", c.tag, ": ", err)
@@ -238,8 +241,6 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 		c.state.unavailable = false
 		c.state.lastCredentialLoadAttempt = time.Now()
 		c.state.lastCredentialLoadError = ""
-		c.state.accountType = latestCredentials.SubscriptionType
-		c.state.rateLimitTier = latestCredentials.RateLimitTier
 		c.checkTransitionLocked()
 		shouldEmit := before != c.statusSnapshotLocked()
 		c.stateAccess.Unlock()
@@ -258,8 +259,6 @@ func (c *defaultCredential) getAccessToken() (string, error) {
 	c.state.unavailable = false
 	c.state.lastCredentialLoadAttempt = time.Now()
 	c.state.lastCredentialLoadError = ""
-	c.state.accountType = newCredentials.SubscriptionType
-	c.state.rateLimitTier = newCredentials.RateLimitTier
 	c.checkTransitionLocked()
 	shouldEmit := before != c.statusSnapshotLocked()
 	c.stateAccess.Unlock()
@@ -663,6 +662,12 @@ func (c *defaultCredential) pollUsage() {
 	}
 }
 
+// fetchProfile calls GET /api/oauth/profile to retrieve account and organization info.
+// Same endpoint used by Claude Code (@anthropic-ai/claude-code @2.1.81):
+//
+//	ref: cli.js GB() — fetches profile
+//	ref: cli.js AH8() / fetchProfileInfo — parses organization_type, rate_limit_tier
+//	ref: cli.js EX1() / populateOAuthAccountInfoIfNeeded — stores account.uuid
 func (c *defaultCredential) fetchProfile(httpClient *http.Client, accessToken string) {
 	ctx := c.serviceContext
 	response, err := doHTTPWithRetry(ctx, httpClient, func() (*http.Request, error) {
@@ -686,6 +691,9 @@ func (c *defaultCredential) fetchProfile(httpClient *http.Client, accessToken st
 	}
 
 	var profileResponse struct {
+		Account *struct {
+			UUID string `json:"uuid"`
+		} `json:"account"`
 		Organization *struct {
 			OrganizationType string `json:"organization_type"`
 			RateLimitTier    string `json:"rate_limit_tier"`
@@ -711,6 +719,9 @@ func (c *defaultCredential) fetchProfile(httpClient *http.Client, accessToken st
 
 	c.stateAccess.Lock()
 	before := c.statusSnapshotLocked()
+	if profileResponse.Account != nil && profileResponse.Account.UUID != "" {
+		c.state.accountUUID = profileResponse.Account.UUID
+	}
 	if accountType != "" && c.state.accountType == "" {
 		c.state.accountType = accountType
 	}
@@ -723,6 +734,7 @@ func (c *defaultCredential) fetchProfile(httpClient *http.Client, accessToken st
 	if shouldEmit {
 		c.emitStatusUpdate()
 	}
+	c.savePersistedState()
 	c.logger.Info("fetched profile for ", c.tag, ": type=", resolvedAccountType, ", tier=", rateLimitTier, ", weight=", ccmPlanWeight(resolvedAccountType, rateLimitTier))
 }
 
@@ -781,6 +793,7 @@ func (c *defaultCredential) buildProxyRequest(ctx context.Context, original *htt
 	proxyURL := claudeAPIBaseURL + original.URL.RequestURI()
 	var body io.Reader
 	if bodyBytes != nil {
+		bodyBytes = c.injectAccountUUID(bodyBytes)
 		body = bytes.NewReader(bodyBytes)
 	} else {
 		body = original.Body
@@ -815,4 +828,60 @@ func (c *defaultCredential) buildProxyRequest(ctx context.Context, original *htt
 	proxyRequest.Header.Set("Authorization", "Bearer "+accessToken)
 
 	return proxyRequest, nil
+}
+
+// injectAccountUUID fills in the account_uuid field in metadata.user_id
+// when the client sends it empty (e.g. using ANTHROPIC_AUTH_TOKEN).
+//
+// Claude Code >= 2.1.78 (@anthropic-ai/claude-code) sets metadata as:
+//
+//	{user_id: JSON.stringify({device_id, account_uuid, session_id})}
+//
+// ref: cli.js L66() — metadata constructor
+//
+// account_uuid is populated from oauthAccount.accountUuid which comes from
+// the /api/oauth/profile endpoint (ref: cli.js EX1() → fP6()).
+// When the client uses ANTHROPIC_AUTH_TOKEN instead of Claude AI OAuth,
+// account_uuid is empty. We inject it from the fetchProfile result.
+func (c *defaultCredential) injectAccountUUID(bodyBytes []byte) []byte {
+	c.stateAccess.RLock()
+	accountUUID := c.state.accountUUID
+	c.stateAccess.RUnlock()
+	if accountUUID == "" {
+		return bodyBytes
+	}
+
+	var body struct {
+		Metadata struct {
+			UserID string `json:"user_id"`
+		} `json:"metadata"`
+	}
+	if json.Unmarshal(bodyBytes, &body) != nil || body.Metadata.UserID == "" {
+		return bodyBytes
+	}
+
+	var userIDObject map[string]any
+	if json.Unmarshal([]byte(body.Metadata.UserID), &userIDObject) != nil {
+		return bodyBytes
+	}
+	existing, _ := userIDObject["account_uuid"].(string)
+	if existing != "" {
+		return bodyBytes
+	}
+	userIDObject["account_uuid"] = accountUUID
+	newUserID, err := json.Marshal(userIDObject)
+	if err != nil {
+		return bodyBytes
+	}
+
+	newUserIDStr := string(newUserID)
+	oldUserIDJSON, err := json.Marshal(body.Metadata.UserID)
+	if err != nil {
+		return bodyBytes
+	}
+	newUserIDJSON, err := json.Marshal(newUserIDStr)
+	if err != nil {
+		return bodyBytes
+	}
+	return bytes.Replace(bodyBytes, oldUserIDJSON, newUserIDJSON, 1)
 }

@@ -128,14 +128,19 @@ func writeCredentialsToFile(oauthCredentials *oauthCredentials, path string) err
 	return os.WriteFile(path, data, 0o600)
 }
 
+// oauthCredentials mirrors the claudeAiOauth object in Claude Code's
+// credential file ($CLAUDE_CONFIG_DIR/.credentials.json).
+//
+// ref (@anthropic-ai/claude-code @2.1.81): cli.js mB6() / refreshOAuthToken
+//
+// Note: subscriptionType, rateLimitTier, and isMax were removed from this
+// struct — they are profile state, not auth credentials. Claude Code also
+// stores them here, but we persist them separately via state_path instead.
 type oauthCredentials struct {
-	AccessToken      string   `json:"accessToken"`
-	RefreshToken     string   `json:"refreshToken"`
-	ExpiresAt        int64    `json:"expiresAt"`
-	Scopes           []string `json:"scopes,omitempty"`
-	SubscriptionType string   `json:"subscriptionType,omitempty"`
-	RateLimitTier    string   `json:"rateLimitTier,omitempty"`
-	IsMax            bool     `json:"isMax,omitempty"`
+	AccessToken  string   `json:"accessToken"`
+	RefreshToken string   `json:"refreshToken"`
+	ExpiresAt    int64    `json:"expiresAt"`
+	Scopes       []string `json:"scopes,omitempty"`
 }
 
 func (c *oauthCredentials) needsRefresh() bool {
@@ -225,8 +230,5 @@ func credentialsEqual(left *oauthCredentials, right *oauthCredentials) bool {
 	return left.AccessToken == right.AccessToken &&
 		left.RefreshToken == right.RefreshToken &&
 		left.ExpiresAt == right.ExpiresAt &&
-		slices.Equal(left.Scopes, right.Scopes) &&
-		left.SubscriptionType == right.SubscriptionType &&
-		left.RateLimitTier == right.RateLimitTier &&
-		left.IsMax == right.IsMax
+		slices.Equal(left.Scopes, right.Scopes)
 }

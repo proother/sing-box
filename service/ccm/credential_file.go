@@ -117,8 +117,6 @@ func (c *defaultCredential) reloadCredentials(force bool) error {
 	before := c.statusSnapshotLocked()
 	c.state.unavailable = false
 	c.state.lastCredentialLoadError = ""
-	c.state.accountType = credentials.SubscriptionType
-	c.state.rateLimitTier = credentials.RateLimitTier
 	c.checkTransitionLocked()
 	shouldEmit := before != c.statusSnapshotLocked()
 	c.stateAccess.Unlock()

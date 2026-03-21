@@ -59,6 +59,7 @@ type credentialState struct {
 	weeklyReset               time.Time
 	hardRateLimited           bool
 	rateLimitResetAt          time.Time
+	accountUUID               string
 	accountType               string
 	rateLimitTier             string
 	remotePlanWeight          float64

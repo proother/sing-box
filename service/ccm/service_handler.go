@@ -69,6 +69,19 @@ func extractWeeklyCycleHint(headers http.Header) *WeeklyCycleHint {
 	}
 }
 
+// extractCCMSessionID extracts the session ID from the request body's metadata.user_id field.
+//
+// Claude Code >= 2.1.78 (@anthropic-ai/claude-code) encodes user_id as:
+//
+//	JSON.stringify({device_id, account_uuid, session_id, ...extras})
+//
+// ref: cli.js L66() — metadata constructor
+//
+// Claude Code < 2.1.78 used a template literal:
+//
+//	`user_${deviceId}_account_${accountUuid}_session_${sessionId}`
+//
+// ref: cli.js qs() — old metadata constructor
 func extractCCMSessionID(bodyBytes []byte) string {
 	var body struct {
 		Metadata struct {
@@ -80,6 +93,16 @@ func extractCCMSessionID(bodyBytes []byte) string {
 		return ""
 	}
 	userID := body.Metadata.UserID
+
+	// v2.1.78+ JSON object format
+	var userIDObject struct {
+		SessionID string `json:"session_id"`
+	}
+	if json.Unmarshal([]byte(userID), &userIDObject) == nil && userIDObject.SessionID != "" {
+		return userIDObject.SessionID
+	}
+
+	// legacy template literal format
 	sessionIndex := strings.LastIndex(userID, "_session_")
 	if sessionIndex < 0 {
 		return ""

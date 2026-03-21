@@ -77,6 +77,7 @@ func (c *CCMCredential) UnmarshalJSON(bytes []byte) error {
 
 type CCMDefaultCredentialOptions struct {
 	CredentialPath string `json:"credential_path,omitempty"`
+	StatePath      string `json:"state_path,omitempty"`
 	UsagesPath     string `json:"usages_path,omitempty"`
 	Detour         string `json:"detour,omitempty"`
 	Reserve5h      uint8  `json:"reserve_5h"`
