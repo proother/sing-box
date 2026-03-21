@@ -18,6 +18,6 @@
 .DS_Store
 /config.d/
 /venv/
-CLAUDE.md
-AGENTS.md
+/CLAUDE.md
+/AGENTS.md
 /.claude/
