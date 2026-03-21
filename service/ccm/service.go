@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	boxService "github.com/sagernet/sing-box/adapter/service"
@@ -163,8 +165,27 @@ type Service struct {
 	allCredentials []Credential
 	userConfigMap  map[string]*option.CCMUser
 
+	sessionModelAccess sync.Mutex
+	sessionModels      map[sessionModelKey]time.Time
+
 	statusSubscriber *observable.Subscriber[struct{}]
 	statusObserver   *observable.Observer[struct{}]
+}
+
+type sessionModelKey struct {
+	sessionID string
+	model     string
+}
+
+func (s *Service) cleanSessionModels() {
+	now := time.Now()
+	s.sessionModelAccess.Lock()
+	for key, createdAt := range s.sessionModels {
+		if now.Sub(createdAt) > sessionExpiry {
+			delete(s.sessionModels, key)
+		}
+	}
+	s.sessionModelAccess.Unlock()
 }
 
 func NewService(ctx context.Context, logger log.ContextLogger, tag string, options option.CCMServiceOptions) (adapter.Service, error) {
@@ -212,6 +233,7 @@ func NewService(ctx context.Context, logger log.ContextLogger, tag string, optio
 			Listen:  options.ListenOptions,
 		}),
 		userManager:      userManager,
+		sessionModels:    make(map[sessionModelKey]time.Time),
 		statusSubscriber: statusSubscriber,
 		statusObserver:   observable.NewObserver[struct{}](statusSubscriber, 8),
 	}

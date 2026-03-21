@@ -218,6 +218,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	provider.pollIfStale()
+	s.cleanSessionModels()
 
 	anthropicBetaHeader := r.Header.Get("anthropic-beta")
 	if isFastModeRequest(anthropicBetaHeader) {
@@ -235,7 +236,22 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeNonRetryableCredentialError(w, r, unavailableCredentialMessage(provider, err.Error()))
 		return
 	}
-	if isNew {
+	modelDisplay := requestModel
+	if requestModel != "" && isExtendedContextRequest(anthropicBetaHeader) {
+		modelDisplay += "[1m]"
+	}
+	isNewModel := false
+	if sessionID != "" && modelDisplay != "" {
+		key := sessionModelKey{sessionID, modelDisplay}
+		s.sessionModelAccess.Lock()
+		_, exists := s.sessionModels[key]
+		if !exists {
+			s.sessionModels[key] = time.Now()
+			isNewModel = true
+		}
+		s.sessionModelAccess.Unlock()
+	}
+	if isNew || isNewModel {
 		logParts := []any{"assigned credential ", selectedCredential.tagName()}
 		if sessionID != "" {
 			logParts = append(logParts, " for session ", sessionID)
@@ -243,11 +259,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if username != "" {
 			logParts = append(logParts, " by user ", username)
 		}
-		if requestModel != "" {
-			modelDisplay := requestModel
-			if isExtendedContextRequest(anthropicBetaHeader) {
-				modelDisplay += "[1m]"
-			}
+		if modelDisplay != "" {
 			logParts = append(logParts, ", model=", modelDisplay)
 		}
 		s.logger.DebugContext(ctx, logParts...)
