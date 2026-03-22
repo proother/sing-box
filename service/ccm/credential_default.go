@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"sync"
@@ -29,9 +30,11 @@ type defaultCredential struct {
 	tag                string
 	serviceContext     context.Context
 	credentialPath     string
+	claudeDirectory    string
 	credentialFilePath string
 	configDir          string
-	statePath          string
+	deviceID           string
+	configLoaded       bool
 	credentials        *oauthCredentials
 	access             sync.RWMutex
 	state              credentialState
@@ -109,7 +112,7 @@ func newDefaultCredential(ctx context.Context, tag string, options option.CCMDef
 		tag:               tag,
 		serviceContext:    ctx,
 		credentialPath:    options.CredentialPath,
-		statePath:         options.StatePath,
+		claudeDirectory:   options.ClaudeDirectory,
 		cap5h:             cap5h,
 		capWeekly:         capWeekly,
 		forwardHTTPClient: httpClient,
@@ -129,13 +132,18 @@ func newDefaultCredential(ctx context.Context, tag string, options option.CCMDef
 }
 
 func (c *defaultCredential) start() error {
+	if c.claudeDirectory != "" {
+		c.loadClaudeCodeConfig()
+		if c.credentialPath == "" {
+			c.credentialPath = filepath.Join(c.claudeDirectory, ".credentials.json")
+		}
+	}
 	credentialFilePath, err := resolveCredentialFilePath(c.credentialPath)
 	if err != nil {
 		return E.Cause(err, "resolve credential path for ", c.tag)
 	}
 	c.credentialFilePath = credentialFilePath
 	c.configDir = resolveConfigDir(c.credentialPath, credentialFilePath)
-	c.loadPersistedState()
 	err = c.ensureCredentialWatcher()
 	if err != nil {
 		c.logger.Debug("start credential watcher for ", c.tag, ": ", err)
@@ -152,6 +160,28 @@ func (c *defaultCredential) start() error {
 	}
 	go c.pollUsage()
 	return nil
+}
+
+func (c *defaultCredential) loadClaudeCodeConfig() {
+	configFilePath := resolveClaudeConfigFile(c.claudeDirectory)
+	if configFilePath == "" {
+		return
+	}
+	config, err := readClaudeCodeConfig(configFilePath)
+	if err != nil {
+		c.logger.Warn("read claude code config for ", c.tag, ": ", err)
+		return
+	}
+	c.stateAccess.Lock()
+	if config.OAuthAccount != nil && config.OAuthAccount.AccountUUID != "" {
+		c.state.accountUUID = config.OAuthAccount.AccountUUID
+	}
+	c.stateAccess.Unlock()
+	if config.UserID != "" {
+		c.deviceID = config.UserID
+	}
+	c.configLoaded = true
+	c.logger.Debug("loaded claude code config for ", c.tag, ": account=", c.state.accountUUID, ", device=", c.deviceID)
 }
 
 func (c *defaultCredential) setStatusSubscriber(subscriber *observable.Subscriber[struct{}]) {
@@ -697,7 +727,7 @@ func (c *defaultCredential) pollUsage() {
 		}
 		c.logger.Debug("poll usage for ", c.tag, ": 5h=", c.state.fiveHourUtilization, "%, weekly=", c.state.weeklyUtilization, "%", resetSuffix)
 	}
-	needsProfileFetch := c.state.rateLimitTier == ""
+	needsProfileFetch := !c.configLoaded && c.state.rateLimitTier == ""
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
 	if shouldInterrupt {
@@ -782,7 +812,6 @@ func (c *defaultCredential) fetchProfile(httpClient *http.Client, accessToken st
 	if shouldEmit {
 		c.emitStatusUpdate()
 	}
-	c.savePersistedState()
 	c.logger.Info("fetched profile for ", c.tag, ": type=", resolvedAccountType, ", tier=", rateLimitTier, ", weight=", ccmPlanWeight(resolvedAccountType, rateLimitTier))
 }
 
@@ -841,7 +870,7 @@ func (c *defaultCredential) buildProxyRequest(ctx context.Context, original *htt
 	proxyURL := claudeAPIBaseURL + original.URL.RequestURI()
 	var body io.Reader
 	if bodyBytes != nil {
-		bodyBytes = c.injectAccountUUID(bodyBytes)
+		bodyBytes = c.injectMetadataFields(bodyBytes)
 		body = bytes.NewReader(bodyBytes)
 	} else {
 		body = original.Body
@@ -878,24 +907,20 @@ func (c *defaultCredential) buildProxyRequest(ctx context.Context, original *htt
 	return proxyRequest, nil
 }
 
-// injectAccountUUID fills in the account_uuid field in metadata.user_id
-// when the client sends it empty (e.g. using ANTHROPIC_AUTH_TOKEN).
+// injectMetadataFields fills in account_uuid and device_id in metadata.user_id
+// when the client sends them empty (e.g. using ANTHROPIC_AUTH_TOKEN).
 //
 // Claude Code >= 2.1.78 (@anthropic-ai/claude-code) sets metadata as:
 //
 //	{user_id: JSON.stringify({device_id, account_uuid, session_id})}
 //
 // ref: cli.js L66() — metadata constructor
-//
-// account_uuid is populated from oauthAccount.accountUuid which comes from
-// the /api/oauth/profile endpoint (ref: cli.js EX1() → fP6()).
-// When the client uses ANTHROPIC_AUTH_TOKEN instead of Claude AI OAuth,
-// account_uuid is empty. We inject it from the fetchProfile result.
-func (c *defaultCredential) injectAccountUUID(bodyBytes []byte) []byte {
+func (c *defaultCredential) injectMetadataFields(bodyBytes []byte) []byte {
 	c.stateAccess.RLock()
 	accountUUID := c.state.accountUUID
 	c.stateAccess.RUnlock()
-	if accountUUID == "" {
+	deviceID := c.deviceID
+	if accountUUID == "" && deviceID == "" {
 		return bodyBytes
 	}
 
@@ -931,19 +956,43 @@ func (c *defaultCredential) injectAccountUUID(bodyBytes []byte) []byte {
 		return bodyBytes
 	}
 
-	existingRaw, hasExisting := userIDObject["account_uuid"]
-	if hasExisting {
-		var existing string
-		if json.Unmarshal(existingRaw, &existing) == nil && existing != "" {
-			return bodyBytes
+	modified := false
+
+	if accountUUID != "" {
+		existingRaw, hasExisting := userIDObject["account_uuid"]
+		needsInject := !hasExisting
+		if hasExisting {
+			var existing string
+			needsInject = json.Unmarshal(existingRaw, &existing) != nil || existing == ""
+		}
+		if needsInject {
+			accountUUIDJSON, marshalErr := json.Marshal(accountUUID)
+			if marshalErr == nil {
+				userIDObject["account_uuid"] = json.RawMessage(accountUUIDJSON)
+				modified = true
+			}
 		}
 	}
 
-	accountUUIDJSON, err := json.Marshal(accountUUID)
-	if err != nil {
+	if deviceID != "" {
+		existingRaw, hasExisting := userIDObject["device_id"]
+		needsInject := !hasExisting
+		if hasExisting {
+			var existing string
+			needsInject = json.Unmarshal(existingRaw, &existing) != nil || existing == ""
+		}
+		if needsInject {
+			deviceIDJSON, marshalErr := json.Marshal(deviceID)
+			if marshalErr == nil {
+				userIDObject["device_id"] = json.RawMessage(deviceIDJSON)
+				modified = true
+			}
+		}
+	}
+
+	if !modified {
 		return bodyBytes
 	}
-	userIDObject["account_uuid"] = json.RawMessage(accountUUIDJSON)
 
 	newUserIDBytes, err := json.Marshal(userIDObject)
 	if err != nil {

@@ -76,14 +76,14 @@ func (c *CCMCredential) UnmarshalJSON(bytes []byte) error {
 }
 
 type CCMDefaultCredentialOptions struct {
-	CredentialPath string `json:"credential_path,omitempty"`
-	StatePath      string `json:"state_path,omitempty"`
-	UsagesPath     string `json:"usages_path,omitempty"`
-	Detour         string `json:"detour,omitempty"`
-	Reserve5h      uint8  `json:"reserve_5h"`
-	ReserveWeekly  uint8  `json:"reserve_weekly"`
-	Limit5h        uint8  `json:"limit_5h,omitempty"`
-	LimitWeekly    uint8  `json:"limit_weekly,omitempty"`
+	CredentialPath  string `json:"credential_path,omitempty"`
+	ClaudeDirectory string `json:"claude_directory,omitempty"`
+	UsagesPath      string `json:"usages_path,omitempty"`
+	Detour          string `json:"detour,omitempty"`
+	Reserve5h       uint8  `json:"reserve_5h"`
+	ReserveWeekly   uint8  `json:"reserve_weekly"`
+	Limit5h         uint8  `json:"limit_5h,omitempty"`
+	LimitWeekly     uint8  `json:"limit_weekly,omitempty"`
 }
 
 type CCMBalancerCredentialOptions struct {
