@@ -19,7 +19,14 @@ type claudeCodeConfig struct {
 }
 
 type claudeOAuthAccount struct {
-	AccountUUID string `json:"accountUuid"`
+	AccountUUID           string  `json:"accountUuid,omitempty"`
+	EmailAddress          string  `json:"emailAddress,omitempty"`
+	OrganizationUUID      string  `json:"organizationUuid,omitempty"`
+	DisplayName           *string `json:"displayName,omitempty"`
+	HasExtraUsageEnabled  *bool   `json:"hasExtraUsageEnabled,omitempty"`
+	BillingType           *string `json:"billingType,omitempty"`
+	AccountCreatedAt      *string `json:"accountCreatedAt,omitempty"`
+	SubscriptionCreatedAt *string `json:"subscriptionCreatedAt,omitempty"`
 }
 
 // resolveClaudeConfigFile finds the Claude Code config file within the given directory.
@@ -33,8 +40,8 @@ type claudeOAuthAccount struct {
 func resolveClaudeConfigFile(claudeDirectory string) string {
 	candidates := []string{
 		filepath.Join(claudeDirectory, ".config.json"),
-		filepath.Join(claudeDirectory, ".claude.json"),
-		filepath.Join(filepath.Dir(claudeDirectory), ".claude.json"),
+		filepath.Join(claudeDirectory, claudeCodeLegacyConfigFileName()),
+		filepath.Join(filepath.Dir(claudeDirectory), claudeCodeLegacyConfigFileName()),
 	}
 	for _, candidate := range candidates {
 		_, err := os.Stat(candidate)
@@ -56,4 +63,85 @@ func readClaudeCodeConfig(path string) (*claudeCodeConfig, error) {
 		return nil, err
 	}
 	return &config, nil
+}
+
+func resolveClaudeConfigWritePath(claudeDirectory string) string {
+	if claudeDirectory == "" {
+		return ""
+	}
+	existingPath := resolveClaudeConfigFile(claudeDirectory)
+	if existingPath != "" {
+		return existingPath
+	}
+	if os.Getenv("CLAUDE_CONFIG_DIR") != "" {
+		return filepath.Join(claudeDirectory, claudeCodeLegacyConfigFileName())
+	}
+	defaultClaudeDirectory := filepath.Join(filepath.Dir(claudeDirectory), ".claude")
+	if claudeDirectory != defaultClaudeDirectory {
+		return filepath.Join(claudeDirectory, claudeCodeLegacyConfigFileName())
+	}
+	return filepath.Join(filepath.Dir(claudeDirectory), claudeCodeLegacyConfigFileName())
+}
+
+func writeClaudeCodeOAuthAccount(path string, account *claudeOAuthAccount) error {
+	if path == "" || account == nil {
+		return nil
+	}
+	storage := jsonFileStorage{path: path}
+	return writeStorageValue(storage, "oauthAccount", account)
+}
+
+func claudeCodeLegacyConfigFileName() string {
+	if os.Getenv("CLAUDE_CODE_CUSTOM_OAUTH_URL") != "" {
+		return ".claude-custom-oauth.json"
+	}
+	return ".claude.json"
+}
+
+func cloneClaudeOAuthAccount(account *claudeOAuthAccount) *claudeOAuthAccount {
+	if account == nil {
+		return nil
+	}
+	cloned := *account
+	cloned.DisplayName = cloneStringPointer(account.DisplayName)
+	cloned.HasExtraUsageEnabled = cloneBoolPointer(account.HasExtraUsageEnabled)
+	cloned.BillingType = cloneStringPointer(account.BillingType)
+	cloned.AccountCreatedAt = cloneStringPointer(account.AccountCreatedAt)
+	cloned.SubscriptionCreatedAt = cloneStringPointer(account.SubscriptionCreatedAt)
+	return &cloned
+}
+
+func mergeClaudeOAuthAccount(base *claudeOAuthAccount, update *claudeOAuthAccount) *claudeOAuthAccount {
+	if update == nil {
+		return cloneClaudeOAuthAccount(base)
+	}
+	if base == nil {
+		return cloneClaudeOAuthAccount(update)
+	}
+	merged := cloneClaudeOAuthAccount(base)
+	if update.AccountUUID != "" {
+		merged.AccountUUID = update.AccountUUID
+	}
+	if update.EmailAddress != "" {
+		merged.EmailAddress = update.EmailAddress
+	}
+	if update.OrganizationUUID != "" {
+		merged.OrganizationUUID = update.OrganizationUUID
+	}
+	if update.DisplayName != nil {
+		merged.DisplayName = cloneStringPointer(update.DisplayName)
+	}
+	if update.HasExtraUsageEnabled != nil {
+		merged.HasExtraUsageEnabled = cloneBoolPointer(update.HasExtraUsageEnabled)
+	}
+	if update.BillingType != nil {
+		merged.BillingType = cloneStringPointer(update.BillingType)
+	}
+	if update.AccountCreatedAt != nil {
+		merged.AccountCreatedAt = cloneStringPointer(update.AccountCreatedAt)
+	}
+	if update.SubscriptionCreatedAt != nil {
+		merged.SubscriptionCreatedAt = cloneStringPointer(update.SubscriptionCreatedAt)
+	}
+	return merged
 }

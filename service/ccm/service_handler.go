@@ -377,8 +377,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !selectedCredential.isExternal() && bodyBytes != nil &&
 		(response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
 		shouldRetry := response.StatusCode == http.StatusUnauthorized
+		var peekBody []byte
 		if response.StatusCode == http.StatusForbidden {
-			peekBody, _ := io.ReadAll(response.Body)
+			peekBody, _ = io.ReadAll(response.Body)
 			shouldRetry = strings.Contains(string(peekBody), "OAuth token has been revoked")
 			if !shouldRetry {
 				response.Body.Close()
@@ -389,23 +390,33 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if shouldRetry {
-			response.Body.Close()
-			s.logger.WarnContext(ctx, "upstream auth failure from ", selectedCredential.tagName(), ", reloading credentials and retrying")
+			recovered := false
 			if defaultCred, ok := selectedCredential.(*defaultCredential); ok {
-				_ = defaultCred.reloadCredentials(true)
+				failedAccessToken := ""
+				currentCredentials := defaultCred.currentCredentials()
+				if currentCredentials != nil {
+					failedAccessToken = currentCredentials.AccessToken
+				}
+				s.logger.WarnContext(ctx, "upstream auth failure from ", selectedCredential.tagName(), ", reloading credentials and retrying")
+				recovered = defaultCred.recoverAuthFailure(failedAccessToken)
 			}
-			retryRequest, buildErr := selectedCredential.buildProxyRequest(requestContext, r, bodyBytes, s.httpHeaders)
-			if buildErr != nil {
-				writeJSONError(w, r, http.StatusBadGateway, "api_error", E.Cause(buildErr, "rebuild request after auth recovery").Error())
-				return
+			if recovered {
+				response.Body.Close()
+				retryRequest, buildErr := selectedCredential.buildProxyRequest(requestContext, r, bodyBytes, s.httpHeaders)
+				if buildErr != nil {
+					writeJSONError(w, r, http.StatusBadGateway, "api_error", E.Cause(buildErr, "rebuild request after auth recovery").Error())
+					return
+				}
+				retryResponse, retryErr := selectedCredential.httpClient().Do(retryRequest)
+				if retryErr != nil {
+					writeJSONError(w, r, http.StatusBadGateway, "api_error", E.Cause(retryErr, "retry request after auth recovery").Error())
+					return
+				}
+				response = retryResponse
+				defer retryResponse.Body.Close()
+			} else if response.StatusCode == http.StatusForbidden {
+				response.Body = io.NopCloser(bytes.NewReader(peekBody))
 			}
-			retryResponse, retryErr := selectedCredential.httpClient().Do(retryRequest)
-			if retryErr != nil {
-				writeJSONError(w, r, http.StatusBadGateway, "api_error", E.Cause(retryErr, "retry request after auth recovery").Error())
-				return
-			}
-			response = retryResponse
-			defer retryResponse.Body.Close()
 		}
 	}
 

@@ -62,6 +62,7 @@ type credentialState struct {
 	accountUUID               string
 	accountType               string
 	rateLimitTier             string
+	oauthAccount              *claudeOAuthAccount
 	remotePlanWeight          float64
 	lastUpdated               time.Time
 	consecutivePollFailures   int

@@ -26,6 +26,15 @@ import (
 	"github.com/sagernet/sing/common/observable"
 )
 
+var acquireCredentialLockFunc = acquireCredentialLock
+
+type claudeProfileSnapshot struct {
+	OAuthAccount     *claudeOAuthAccount
+	AccountType      string
+	RateLimitTier    string
+	SubscriptionType *string
+}
+
 type defaultCredential struct {
 	tag                string
 	serviceContext     context.Context
@@ -33,8 +42,9 @@ type defaultCredential struct {
 	claudeDirectory    string
 	credentialFilePath string
 	configDir          string
+	claudeConfigPath   string
+	syncClaudeConfig   bool
 	deviceID           string
-	configLoaded       bool
 	credentials        *oauthCredentials
 	access             sync.RWMutex
 	state              credentialState
@@ -51,11 +61,6 @@ type defaultCredential struct {
 	watcherRetryAt     time.Time
 
 	statusSubscriber *observable.Subscriber[struct{}]
-
-	// Refresh rate-limit cooldown (protected by access mutex)
-	refreshRetryAt    time.Time
-	refreshRetryError error
-	refreshBlocked    bool
 
 	// Connection interruption
 	interrupted    bool
@@ -113,6 +118,7 @@ func newDefaultCredential(ctx context.Context, tag string, options option.CCMDef
 		serviceContext:    ctx,
 		credentialPath:    options.CredentialPath,
 		claudeDirectory:   options.ClaudeDirectory,
+		syncClaudeConfig:  options.ClaudeDirectory != "" || options.CredentialPath == "",
 		cap5h:             cap5h,
 		capWeekly:         capWeekly,
 		forwardHTTPClient: httpClient,
@@ -133,7 +139,6 @@ func newDefaultCredential(ctx context.Context, tag string, options option.CCMDef
 
 func (c *defaultCredential) start() error {
 	if c.claudeDirectory != "" {
-		c.loadClaudeCodeConfig()
 		if c.credentialPath == "" {
 			c.credentialPath = filepath.Join(c.claudeDirectory, ".credentials.json")
 		}
@@ -144,6 +149,13 @@ func (c *defaultCredential) start() error {
 	}
 	c.credentialFilePath = credentialFilePath
 	c.configDir = resolveConfigDir(c.credentialPath, credentialFilePath)
+	if c.syncClaudeConfig {
+		if c.claudeDirectory == "" {
+			c.claudeDirectory = c.configDir
+		}
+		c.claudeConfigPath = resolveClaudeConfigWritePath(c.claudeDirectory)
+		c.loadClaudeCodeConfig()
+	}
 	err = c.ensureCredentialWatcher()
 	if err != nil {
 		c.logger.Debug("start credential watcher for ", c.tag, ": ", err)
@@ -173,6 +185,7 @@ func (c *defaultCredential) loadClaudeCodeConfig() {
 		return
 	}
 	c.stateAccess.Lock()
+	c.state.oauthAccount = cloneClaudeOAuthAccount(config.OAuthAccount)
 	if config.OAuthAccount != nil && config.OAuthAccount.AccountUUID != "" {
 		c.state.accountUUID = config.OAuthAccount.AccountUUID
 	}
@@ -180,7 +193,7 @@ func (c *defaultCredential) loadClaudeCodeConfig() {
 	if config.UserID != "" {
 		c.deviceID = config.UserID
 	}
-	c.configLoaded = true
+	c.claudeConfigPath = configFilePath
 	c.logger.Debug("loaded claude code config for ", c.tag, ": account=", c.state.accountUUID, ", device=", c.deviceID)
 }
 
@@ -209,147 +222,358 @@ func (c *defaultCredential) statusSnapshotLocked() statusSnapshot {
 func (c *defaultCredential) getAccessToken() (string, error) {
 	c.retryCredentialReloadIfNeeded()
 
-	// Fast path: cached token is still valid
 	c.access.RLock()
-	if c.credentials != nil && !c.credentials.needsRefresh() {
-		token := c.credentials.AccessToken
-		c.access.RUnlock()
-		return token, nil
-	}
+	currentCredentials := cloneCredentials(c.credentials)
 	c.access.RUnlock()
-
-	// Reload from disk — Claude Code or another process may have refreshed
-	err := c.reloadCredentials(true)
-	if err == nil {
-		c.access.RLock()
-		if c.credentials != nil && !c.credentials.needsRefresh() {
-			token := c.credentials.AccessToken
-			c.access.RUnlock()
-			return token, nil
+	if currentCredentials == nil {
+		err := c.reloadCredentials(true)
+		if err != nil {
+			return "", err
 		}
+		c.access.RLock()
+		currentCredentials = cloneCredentials(c.credentials)
 		c.access.RUnlock()
 	}
-
-	// ref (@anthropic-ai/claude-code @2.1.81): cli.js _P1 line 179526
-	// Claude Code skips refresh for tokens without user:inference scope.
-	// Return existing token (may be expired); 401 recovery is the safety net.
-	c.access.RLock()
-	if c.credentials != nil && !slices.Contains(c.credentials.Scopes, "user:inference") {
-		token := c.credentials.AccessToken
-		c.access.RUnlock()
-		return token, nil
-	}
-	c.access.RUnlock()
-
-	// Acquire cross-process lock before refresh (outside Go mutex to avoid holding mutex during sleep)
-	// ref: cli.js _P1 (line 179534-179536) — proper-lockfile lock on config dir
-	release, lockErr := acquireCredentialLock(c.configDir)
-	if lockErr != nil {
-		c.logger.Debug("acquire credential lock for ", c.tag, ": ", lockErr)
-		release = func() {}
-	}
-	defer release()
-
-	// ref: cli.js _P1 (line 179559-179562) — re-read after lock, skip if race resolved
-	_ = c.reloadCredentials(true)
-	c.access.RLock()
-	noRefreshToken := c.credentials == nil || c.credentials.RefreshToken == ""
-	raceResolved := !noRefreshToken && !c.credentials.needsRefresh()
-	var racedToken string
-	if (noRefreshToken || raceResolved) && c.credentials != nil {
-		racedToken = c.credentials.AccessToken
-	}
-	c.access.RUnlock()
-	if noRefreshToken || raceResolved {
-		return racedToken, nil
-	}
-
-	// Slow path: acquire Go mutex and refresh
-	c.access.Lock()
-	defer c.access.Unlock()
-
-	if c.credentials == nil {
+	if currentCredentials == nil {
 		return "", c.unavailableError()
 	}
-	if !c.credentials.needsRefresh() {
+	if !currentCredentials.needsRefresh() || !slices.Contains(currentCredentials.Scopes, "user:inference") {
+		return currentCredentials.AccessToken, nil
+	}
+	c.tryRefreshCredentials(false)
+	c.access.RLock()
+	defer c.access.RUnlock()
+	if c.credentials != nil && c.credentials.AccessToken != "" {
 		return c.credentials.AccessToken, nil
 	}
+	return "", c.unavailableError()
+}
 
-	if c.refreshBlocked {
-		return "", c.refreshRetryError
-	}
-	if !c.refreshRetryAt.IsZero() && time.Now().Before(c.refreshRetryAt) {
-		return "", c.refreshRetryError
-	}
+func (c *defaultCredential) shouldUseClaudeConfig() bool {
+	return c.syncClaudeConfig && c.claudeConfigPath != ""
+}
 
-	err = platformCanWriteCredentials(c.credentialPath)
-	if err != nil {
-		return "", E.Cause(err, "credential file not writable, refusing refresh to avoid invalidation")
-	}
+func (c *defaultCredential) absorbCredentials(credentials *oauthCredentials) {
+	c.access.Lock()
+	c.credentials = cloneCredentials(credentials)
+	c.access.Unlock()
 
-	baseCredentials := cloneCredentials(c.credentials)
-	newCredentials, retryDelay, err := refreshToken(c.serviceContext, c.forwardHTTPClient, c.credentials)
-	if err != nil {
-		if retryDelay < 0 {
-			c.refreshBlocked = true
-			c.refreshRetryError = err
-		} else if retryDelay > 0 {
-			c.refreshRetryAt = time.Now().Add(retryDelay)
-			c.refreshRetryError = err
-		}
-		// ref: cli.js _P1 (line 179568-179573) — post-failure recovery:
-		// re-read from disk; if another process refreshed successfully, use that.
-		// Cannot call reloadCredentials here (deadlock: already holding c.access).
-		latestCredentials, readErr := platformReadCredentials(c.credentialPath)
-		if readErr == nil && latestCredentials != nil && !latestCredentials.needsRefresh() {
-			c.credentials = latestCredentials
-			return latestCredentials.AccessToken, nil
-		}
-		return "", err
-	}
-	c.refreshRetryAt = time.Time{}
-	c.refreshRetryError = nil
-	c.refreshBlocked = false
-
-	latestCredentials, latestErr := platformReadCredentials(c.credentialPath)
-	if latestErr == nil && !credentialsEqual(latestCredentials, baseCredentials) {
-		c.credentials = latestCredentials
-		c.stateAccess.Lock()
-		before := c.statusSnapshotLocked()
-		c.state.unavailable = false
-		c.state.lastCredentialLoadAttempt = time.Now()
-		c.state.lastCredentialLoadError = ""
-		c.checkTransitionLocked()
-		shouldEmit := before != c.statusSnapshotLocked()
-		c.stateAccess.Unlock()
-		if shouldEmit {
-			c.emitStatusUpdate()
-		}
-		if !latestCredentials.needsRefresh() {
-			return latestCredentials.AccessToken, nil
-		}
-		return "", E.New("credential ", c.tag, " changed while refreshing")
-	}
-
-	c.credentials = newCredentials
 	c.stateAccess.Lock()
 	before := c.statusSnapshotLocked()
 	c.state.unavailable = false
 	c.state.lastCredentialLoadAttempt = time.Now()
 	c.state.lastCredentialLoadError = ""
+	c.applyCredentialMetadataLocked(credentials)
 	c.checkTransitionLocked()
 	shouldEmit := before != c.statusSnapshotLocked()
 	c.stateAccess.Unlock()
 	if shouldEmit {
 		c.emitStatusUpdate()
 	}
+}
 
-	err = platformWriteCredentials(newCredentials, c.credentialPath)
-	if err != nil {
+func (c *defaultCredential) applyCredentialMetadataLocked(credentials *oauthCredentials) {
+	if credentials == nil {
+		return
+	}
+	if credentials.SubscriptionType != nil && *credentials.SubscriptionType != "" {
+		c.state.accountType = *credentials.SubscriptionType
+	}
+	if credentials.RateLimitTier != nil && *credentials.RateLimitTier != "" {
+		c.state.rateLimitTier = *credentials.RateLimitTier
+	}
+}
+
+func (c *defaultCredential) absorbOAuthAccount(account *claudeOAuthAccount) {
+	c.stateAccess.Lock()
+	c.state.oauthAccount = mergeClaudeOAuthAccount(c.state.oauthAccount, account)
+	if c.state.oauthAccount != nil && c.state.oauthAccount.AccountUUID != "" {
+		c.state.accountUUID = c.state.oauthAccount.AccountUUID
+	}
+	c.stateAccess.Unlock()
+}
+
+func (c *defaultCredential) persistOAuthAccount() {
+	if !c.shouldUseClaudeConfig() {
+		return
+	}
+	c.stateAccess.RLock()
+	account := cloneClaudeOAuthAccount(c.state.oauthAccount)
+	c.stateAccess.RUnlock()
+	if account == nil {
+		return
+	}
+	if err := writeClaudeCodeOAuthAccount(c.claudeConfigPath, account); err != nil {
+		c.logger.Debug("write claude code config for ", c.tag, ": ", err)
+	}
+}
+
+func (c *defaultCredential) needsProfileHydration() bool {
+	c.stateAccess.RLock()
+	defer c.stateAccess.RUnlock()
+	return c.needsProfileHydrationLocked()
+}
+
+func (c *defaultCredential) needsProfileHydrationLocked() bool {
+	if c.state.accountUUID == "" || c.state.accountType == "" || c.state.rateLimitTier == "" {
+		return true
+	}
+	if c.state.oauthAccount == nil {
+		return true
+	}
+	return c.state.oauthAccount.BillingType == nil ||
+		c.state.oauthAccount.AccountCreatedAt == nil ||
+		c.state.oauthAccount.SubscriptionCreatedAt == nil
+}
+
+func (c *defaultCredential) currentCredentials() *oauthCredentials {
+	c.access.RLock()
+	defer c.access.RUnlock()
+	return cloneCredentials(c.credentials)
+}
+
+func (c *defaultCredential) persistCredentials(credentials *oauthCredentials) {
+	if credentials == nil {
+		return
+	}
+	if err := platformWriteCredentials(credentials, c.credentialPath); err != nil {
 		c.logger.Error("persist refreshed token for ", c.tag, ": ", err)
 	}
+}
 
-	return newCredentials.AccessToken, nil
+func (c *defaultCredential) shouldAttemptRefresh(credentials *oauthCredentials, force bool) bool {
+	if credentials == nil || credentials.RefreshToken == "" {
+		return false
+	}
+	if !slices.Contains(credentials.Scopes, "user:inference") {
+		return false
+	}
+	if force {
+		return true
+	}
+	return credentials.needsRefresh()
+}
+
+func (c *defaultCredential) tryRefreshCredentials(force bool) bool {
+	latestCredentials, err := platformReadCredentials(c.credentialPath)
+	if err == nil && latestCredentials != nil {
+		c.absorbCredentials(latestCredentials)
+	}
+	currentCredentials := c.currentCredentials()
+	if !c.shouldAttemptRefresh(currentCredentials, force) {
+		return false
+	}
+	release, err := acquireCredentialLockFunc(c.configDir)
+	if err != nil {
+		c.logger.Debug("acquire credential lock for ", c.tag, ": ", err)
+		return false
+	}
+	defer release()
+
+	latestCredentials, err = platformReadCredentials(c.credentialPath)
+	if err == nil && latestCredentials != nil {
+		c.absorbCredentials(latestCredentials)
+		currentCredentials = latestCredentials
+	} else {
+		currentCredentials = c.currentCredentials()
+	}
+	if !c.shouldAttemptRefresh(currentCredentials, force) {
+		return false
+	}
+	if err := platformCanWriteCredentials(c.credentialPath); err != nil {
+		c.logger.Debug("credential file not writable for ", c.tag, ": ", err)
+		return false
+	}
+
+	baseCredentials := cloneCredentials(currentCredentials)
+	refreshResult, retryDelay, err := refreshToken(c.serviceContext, c.forwardHTTPClient, currentCredentials)
+	if err != nil {
+		if retryDelay != 0 {
+			c.logger.Debug("refresh token for ", c.tag, ": retry delay=", retryDelay, ", error=", err)
+		} else {
+			c.logger.Debug("refresh token for ", c.tag, ": ", err)
+		}
+		latestCredentials, readErr := platformReadCredentials(c.credentialPath)
+		if readErr == nil && latestCredentials != nil {
+			c.absorbCredentials(latestCredentials)
+			return latestCredentials.AccessToken != "" && (latestCredentials.AccessToken != baseCredentials.AccessToken || !latestCredentials.needsRefresh())
+		}
+		return false
+	}
+	if refreshResult == nil || refreshResult.Credentials == nil {
+		return false
+	}
+
+	refreshedCredentials := cloneCredentials(refreshResult.Credentials)
+	c.absorbCredentials(refreshedCredentials)
+	c.persistCredentials(refreshedCredentials)
+
+	if refreshResult.TokenAccount != nil {
+		c.absorbOAuthAccount(refreshResult.TokenAccount)
+		c.persistOAuthAccount()
+	}
+	if c.needsProfileHydration() {
+		profileSnapshot, profileErr := c.fetchProfileSnapshot(c.forwardHTTPClient, refreshedCredentials.AccessToken)
+		if profileErr != nil {
+			c.logger.Debug("fetch profile for ", c.tag, ": ", profileErr)
+		} else if profileSnapshot != nil {
+			credentialsChanged := c.applyProfileSnapshot(profileSnapshot)
+			c.persistOAuthAccount()
+			if credentialsChanged {
+				c.persistCredentials(c.currentCredentials())
+			}
+		}
+	}
+	return true
+}
+
+func (c *defaultCredential) recoverAuthFailure(failedAccessToken string) bool {
+	latestCredentials, err := platformReadCredentials(c.credentialPath)
+	if err == nil && latestCredentials != nil {
+		c.absorbCredentials(latestCredentials)
+		if latestCredentials.AccessToken != "" && latestCredentials.AccessToken != failedAccessToken {
+			return true
+		}
+	}
+	c.tryRefreshCredentials(true)
+	currentCredentials := c.currentCredentials()
+	return currentCredentials != nil && currentCredentials.AccessToken != "" && currentCredentials.AccessToken != failedAccessToken
+}
+
+func (c *defaultCredential) applyProfileSnapshot(snapshot *claudeProfileSnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+
+	credentialsChanged := false
+	c.access.Lock()
+	if c.credentials != nil {
+		updatedCredentials := cloneCredentials(c.credentials)
+		if snapshot.SubscriptionType != nil {
+			updatedCredentials.SubscriptionType = cloneStringPointer(snapshot.SubscriptionType)
+		}
+		if snapshot.RateLimitTier != "" {
+			updatedCredentials.RateLimitTier = cloneStringPointer(&snapshot.RateLimitTier)
+		}
+		credentialsChanged = !credentialsEqual(c.credentials, updatedCredentials)
+		c.credentials = updatedCredentials
+	}
+	c.access.Unlock()
+
+	c.stateAccess.Lock()
+	before := c.statusSnapshotLocked()
+	if snapshot.OAuthAccount != nil {
+		c.state.oauthAccount = mergeClaudeOAuthAccount(c.state.oauthAccount, snapshot.OAuthAccount)
+		if c.state.oauthAccount != nil && c.state.oauthAccount.AccountUUID != "" {
+			c.state.accountUUID = c.state.oauthAccount.AccountUUID
+		}
+	}
+	if snapshot.AccountType != "" {
+		c.state.accountType = snapshot.AccountType
+	}
+	if snapshot.RateLimitTier != "" {
+		c.state.rateLimitTier = snapshot.RateLimitTier
+	}
+	c.checkTransitionLocked()
+	shouldEmit := before != c.statusSnapshotLocked()
+	c.stateAccess.Unlock()
+	if shouldEmit {
+		c.emitStatusUpdate()
+	}
+	return credentialsChanged
+}
+
+func (c *defaultCredential) fetchProfileSnapshot(httpClient *http.Client, accessToken string) (*claudeProfileSnapshot, error) {
+	ctx := c.serviceContext
+	response, err := doHTTPWithRetry(ctx, httpClient, func() (*http.Request, error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, claudeAPIBaseURL+"/api/oauth/profile", nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("User-Agent", ccmUserAgentValue)
+		return request, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		return nil, E.New("status ", response.StatusCode, " ", string(body))
+	}
+
+	var profileResponse struct {
+		Account *struct {
+			UUID        string `json:"uuid"`
+			Email       string `json:"email"`
+			DisplayName string `json:"display_name"`
+			CreatedAt   string `json:"created_at"`
+		} `json:"account"`
+		Organization *struct {
+			UUID                  string  `json:"uuid"`
+			OrganizationType      string  `json:"organization_type"`
+			RateLimitTier         string  `json:"rate_limit_tier"`
+			HasExtraUsageEnabled  *bool   `json:"has_extra_usage_enabled"`
+			BillingType           *string `json:"billing_type"`
+			SubscriptionCreatedAt *string `json:"subscription_created_at"`
+		} `json:"organization"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&profileResponse); err != nil {
+		return nil, err
+	}
+	if profileResponse.Organization == nil {
+		return nil, nil
+	}
+
+	accountType := normalizeClaudeOrganizationType(profileResponse.Organization.OrganizationType)
+	snapshot := &claudeProfileSnapshot{
+		AccountType:   accountType,
+		RateLimitTier: profileResponse.Organization.RateLimitTier,
+	}
+	if accountType != "" {
+		snapshot.SubscriptionType = cloneStringPointer(&accountType)
+	}
+	account := &claudeOAuthAccount{}
+	if profileResponse.Account != nil {
+		account.AccountUUID = profileResponse.Account.UUID
+		account.EmailAddress = profileResponse.Account.Email
+		account.DisplayName = optionalStringPointer(profileResponse.Account.DisplayName)
+		account.AccountCreatedAt = optionalStringPointer(profileResponse.Account.CreatedAt)
+	}
+	account.OrganizationUUID = profileResponse.Organization.UUID
+	account.HasExtraUsageEnabled = cloneBoolPointer(profileResponse.Organization.HasExtraUsageEnabled)
+	account.BillingType = cloneStringPointer(profileResponse.Organization.BillingType)
+	account.SubscriptionCreatedAt = cloneStringPointer(profileResponse.Organization.SubscriptionCreatedAt)
+	if account.AccountUUID != "" || account.EmailAddress != "" || account.OrganizationUUID != "" || account.DisplayName != nil ||
+		account.HasExtraUsageEnabled != nil || account.BillingType != nil || account.AccountCreatedAt != nil || account.SubscriptionCreatedAt != nil {
+		snapshot.OAuthAccount = account
+	}
+	return snapshot, nil
+}
+
+func normalizeClaudeOrganizationType(organizationType string) string {
+	switch organizationType {
+	case "claude_pro":
+		return "pro"
+	case "claude_max":
+		return "max"
+	case "claude_team":
+		return "team"
+	case "claude_enterprise":
+		return "enterprise"
+	default:
+		return ""
+	}
+}
+
+func optionalStringPointer(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func (c *defaultCredential) updateStateFromHeaders(headers http.Header) {
@@ -727,7 +951,7 @@ func (c *defaultCredential) pollUsage() {
 		}
 		c.logger.Debug("poll usage for ", c.tag, ": 5h=", c.state.fiveHourUtilization, "%, weekly=", c.state.weeklyUtilization, "%", resetSuffix)
 	}
-	needsProfileFetch := !c.configLoaded && c.state.rateLimitTier == ""
+	needsProfileFetch := c.needsProfileHydrationLocked()
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
 	if shouldInterrupt {
@@ -736,83 +960,19 @@ func (c *defaultCredential) pollUsage() {
 	c.emitStatusUpdate()
 
 	if needsProfileFetch {
-		c.fetchProfile(httpClient, accessToken)
-	}
-}
-
-// fetchProfile calls GET /api/oauth/profile to retrieve account and organization info.
-// Same endpoint used by Claude Code (@anthropic-ai/claude-code @2.1.81):
-//
-//	ref: cli.js GB() — fetches profile
-//	ref: cli.js AH8() / fetchProfileInfo — parses organization_type, rate_limit_tier
-//	ref: cli.js EX1() / populateOAuthAccountInfoIfNeeded — stores account.uuid
-func (c *defaultCredential) fetchProfile(httpClient *http.Client, accessToken string) {
-	ctx := c.serviceContext
-	response, err := doHTTPWithRetry(ctx, httpClient, func() (*http.Request, error) {
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, claudeAPIBaseURL+"/api/oauth/profile", nil)
+		profileSnapshot, err := c.fetchProfileSnapshot(httpClient, accessToken)
 		if err != nil {
-			return nil, err
+			c.logger.Debug("fetch profile for ", c.tag, ": ", err)
+			return
 		}
-		request.Header.Set("Authorization", "Bearer "+accessToken)
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("User-Agent", ccmUserAgentValue)
-		return request, nil
-	})
-	if err != nil {
-		c.logger.Debug("fetch profile for ", c.tag, ": ", err)
-		return
+		if profileSnapshot != nil {
+			credentialsChanged := c.applyProfileSnapshot(profileSnapshot)
+			c.persistOAuthAccount()
+			if credentialsChanged {
+				c.persistCredentials(c.currentCredentials())
+			}
+		}
 	}
-	defer response.Body.Close()
-
-	if response.StatusCode != http.StatusOK {
-		return
-	}
-
-	var profileResponse struct {
-		Account *struct {
-			UUID string `json:"uuid"`
-		} `json:"account"`
-		Organization *struct {
-			OrganizationType string `json:"organization_type"`
-			RateLimitTier    string `json:"rate_limit_tier"`
-		} `json:"organization"`
-	}
-	err = json.NewDecoder(response.Body).Decode(&profileResponse)
-	if err != nil || profileResponse.Organization == nil {
-		return
-	}
-
-	accountType := ""
-	switch profileResponse.Organization.OrganizationType {
-	case "claude_pro":
-		accountType = "pro"
-	case "claude_max":
-		accountType = "max"
-	case "claude_team":
-		accountType = "team"
-	case "claude_enterprise":
-		accountType = "enterprise"
-	}
-	rateLimitTier := profileResponse.Organization.RateLimitTier
-
-	c.stateAccess.Lock()
-	before := c.statusSnapshotLocked()
-	if profileResponse.Account != nil && profileResponse.Account.UUID != "" {
-		c.state.accountUUID = profileResponse.Account.UUID
-	}
-	if accountType != "" && c.state.accountType == "" {
-		c.state.accountType = accountType
-	}
-	if rateLimitTier != "" {
-		c.state.rateLimitTier = rateLimitTier
-	}
-	resolvedAccountType := c.state.accountType
-	shouldEmit := before != c.statusSnapshotLocked()
-	c.stateAccess.Unlock()
-	if shouldEmit {
-		c.emitStatusUpdate()
-	}
-	c.logger.Info("fetched profile for ", c.tag, ": type=", resolvedAccountType, ", tier=", rateLimitTier, ", weight=", ccmPlanWeight(resolvedAccountType, rateLimitTier))
 }
 
 func (c *defaultCredential) close() {

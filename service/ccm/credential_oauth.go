@@ -164,21 +164,7 @@ func checkCredentialFileWritable(path string) error {
 // ref (@anthropic-ai/claude-code @2.1.81): cli.js BP6 (line 179444-179454) — read-modify-write
 // ref: cli.js qD1.update (line 176156) — writeFileSync + chmod 0o600
 func writeCredentialsToFile(credentials *oauthCredentials, path string) error {
-	existing := make(map[string]json.RawMessage)
-	data, readErr := os.ReadFile(path)
-	if readErr == nil {
-		_ = json.Unmarshal(data, &existing)
-	}
-	credentialData, err := json.Marshal(credentials)
-	if err != nil {
-		return err
-	}
-	existing["claudeAiOauth"] = credentialData
-	data, err = json.MarshalIndent(existing, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
+	return writeStorageValue(jsonFileStorage{path: path}, "claudeAiOauth", credentials)
 }
 
 // oauthCredentials mirrors the claudeAiOauth object in Claude Code's
@@ -194,6 +180,12 @@ type oauthCredentials struct {
 	RateLimitTier    *string  `json:"rateLimitTier"`    // ref: cli.js line 179452 (?? null)
 }
 
+type oauthRefreshResult struct {
+	Credentials  *oauthCredentials
+	TokenAccount *claudeOAuthAccount
+	Profile      *claudeProfileSnapshot
+}
+
 func (c *oauthCredentials) needsRefresh() bool {
 	if c.ExpiresAt == 0 {
 		return false
@@ -201,7 +193,7 @@ func (c *oauthCredentials) needsRefresh() bool {
 	return time.Now().UnixMilli() >= c.ExpiresAt-tokenRefreshBufferMs
 }
 
-func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oauthCredentials) (*oauthCredentials, time.Duration, error) {
+func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oauthCredentials) (*oauthRefreshResult, time.Duration, error) {
 	if credentials.RefreshToken == "" {
 		return nil, 0, E.New("refresh token is empty")
 	}
@@ -249,10 +241,17 @@ func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oau
 
 	// ref (@anthropic-ai/claude-code @2.1.81): cli.js mB6 response (line 172769-172772)
 	var tokenResponse struct {
-		AccessToken  string `json:"access_token"`  // ref: cli.js line 172770 z
-		RefreshToken string `json:"refresh_token"` // ref: cli.js line 172770 w (defaults to input)
-		ExpiresIn    int    `json:"expires_in"`    // ref: cli.js line 172770 O
-		Scope        string `json:"scope"`         // ref: cli.js line 172772 uB6(Y.scope)
+		AccessToken  string  `json:"access_token"`  // ref: cli.js line 172770 z
+		RefreshToken string  `json:"refresh_token"` // ref: cli.js line 172770 w (defaults to input)
+		ExpiresIn    int     `json:"expires_in"`    // ref: cli.js line 172770 O
+		Scope        *string `json:"scope"`         // ref: cli.js line 172772 uB6(Y.scope)
+		Account      *struct {
+			UUID         string `json:"uuid"`
+			EmailAddress string `json:"email_address"`
+		} `json:"account"`
+		Organization *struct {
+			UUID string `json:"uuid"`
+		} `json:"organization"`
 	}
 	err = json.NewDecoder(response.Body).Decode(&tokenResponse)
 	if err != nil {
@@ -267,11 +266,14 @@ func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oau
 	newCredentials.ExpiresAt = time.Now().UnixMilli() + int64(tokenResponse.ExpiresIn)*1000
 	// ref: cli.js uB6 (line 172696-172697): A?.split(" ").filter(Boolean)
 	// strings.Fields matches .filter(Boolean): splits on whitespace runs, removes empty strings
-	if tokenResponse.Scope != "" {
-		newCredentials.Scopes = strings.Fields(tokenResponse.Scope)
+	if tokenResponse.Scope != nil {
+		newCredentials.Scopes = strings.Fields(*tokenResponse.Scope)
 	}
 
-	return &newCredentials, 0, nil
+	return &oauthRefreshResult{
+		Credentials:  &newCredentials,
+		TokenAccount: extractTokenAccount(tokenResponse.Account, tokenResponse.Organization),
+	}, 0, nil
 }
 
 func cloneCredentials(credentials *oauthCredentials) *oauthCredentials {
@@ -280,6 +282,8 @@ func cloneCredentials(credentials *oauthCredentials) *oauthCredentials {
 	}
 	cloned := *credentials
 	cloned.Scopes = append([]string(nil), credentials.Scopes...)
+	cloned.SubscriptionType = cloneStringPointer(credentials.SubscriptionType)
+	cloned.RateLimitTier = cloneStringPointer(credentials.RateLimitTier)
 	return &cloned
 }
 
@@ -290,5 +294,31 @@ func credentialsEqual(left *oauthCredentials, right *oauthCredentials) bool {
 	return left.AccessToken == right.AccessToken &&
 		left.RefreshToken == right.RefreshToken &&
 		left.ExpiresAt == right.ExpiresAt &&
-		slices.Equal(left.Scopes, right.Scopes)
+		slices.Equal(left.Scopes, right.Scopes) &&
+		equalStringPointer(left.SubscriptionType, right.SubscriptionType) &&
+		equalStringPointer(left.RateLimitTier, right.RateLimitTier)
+}
+
+func extractTokenAccount(account *struct {
+	UUID         string `json:"uuid"`
+	EmailAddress string `json:"email_address"`
+}, organization *struct {
+	UUID string `json:"uuid"`
+},
+) *claudeOAuthAccount {
+	if account == nil && organization == nil {
+		return nil
+	}
+	tokenAccount := &claudeOAuthAccount{}
+	if account != nil {
+		tokenAccount.AccountUUID = account.UUID
+		tokenAccount.EmailAddress = account.EmailAddress
+	}
+	if organization != nil {
+		tokenAccount.OrganizationUUID = organization.UUID
+	}
+	if tokenAccount.AccountUUID == "" && tokenAccount.EmailAddress == "" && tokenAccount.OrganizationUUID == "" {
+		return nil
+	}
+	return tokenAccount
 }

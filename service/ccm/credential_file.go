@@ -106,24 +106,7 @@ func (c *defaultCredential) reloadCredentials(force bool) error {
 		return c.markCredentialsUnavailable(E.Cause(err, "read credentials"))
 	}
 
-	c.access.Lock()
-	c.credentials = credentials
-	c.refreshRetryAt = time.Time{}
-	c.refreshRetryError = nil
-	c.refreshBlocked = false
-	c.access.Unlock()
-
-	c.stateAccess.Lock()
-	before := c.statusSnapshotLocked()
-	c.state.unavailable = false
-	c.state.lastCredentialLoadError = ""
-	c.checkTransitionLocked()
-	shouldEmit := before != c.statusSnapshotLocked()
-	c.stateAccess.Unlock()
-	if shouldEmit {
-		c.emitStatusUpdate()
-	}
-
+	c.absorbCredentials(credentials)
 	return nil
 }
 
