@@ -359,9 +359,14 @@ func (c *defaultCredential) updateStateFromHeaders(headers http.Header) {
 			}
 		}
 	}
+	if snapshots := parseRateLimitSnapshotsFromHeaders(headers); len(snapshots) > 0 {
+		hadData = true
+		applyRateLimitSnapshotsLocked(&c.state, snapshots, headers.Get("x-codex-active-limit"), c.state.remotePlanWeight, c.state.accountType)
+	}
 	if hadData {
 		c.state.consecutivePollFailures = 0
 		c.state.lastUpdated = time.Now()
+		c.state.noteSnapshotData()
 	}
 	if isFirstUpdate || int(c.state.fiveHourUtilization*100) != int(oldFiveHour*100) || int(c.state.weeklyUtilization*100) != int(oldWeekly*100) {
 		resetSuffix := ""
@@ -386,6 +391,7 @@ func (c *defaultCredential) markRateLimited(resetAt time.Time) {
 	c.stateAccess.Lock()
 	c.state.hardRateLimited = true
 	c.state.rateLimitResetAt = resetAt
+	c.state.setAvailability(availabilityStateRateLimited, availabilityReasonHardRateLimit, resetAt)
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
 	if shouldInterrupt {
@@ -395,6 +401,17 @@ func (c *defaultCredential) markRateLimited(resetAt time.Time) {
 }
 
 func (c *defaultCredential) markUpstreamRejected() {}
+
+func (c *defaultCredential) markTemporarilyBlocked(reason availabilityReason, resetAt time.Time) {
+	c.stateAccess.Lock()
+	c.state.setAvailability(availabilityStateTemporarilyBlocked, reason, resetAt)
+	shouldInterrupt := c.checkTransitionLocked()
+	c.stateAccess.Unlock()
+	if shouldInterrupt {
+		c.interruptConnections()
+	}
+	c.emitStatusUpdate()
+}
 
 func (c *defaultCredential) isUsable() bool {
 	c.retryCredentialReloadIfNeeded()
@@ -483,6 +500,12 @@ func (c *defaultCredential) fiveHourUtilization() float64 {
 	return c.state.fiveHourUtilization
 }
 
+func (c *defaultCredential) hasSnapshotData() bool {
+	c.stateAccess.RLock()
+	defer c.stateAccess.RUnlock()
+	return c.state.hasSnapshotData()
+}
+
 func (c *defaultCredential) weeklyUtilization() float64 {
 	c.stateAccess.RLock()
 	defer c.stateAccess.RUnlock()
@@ -515,6 +538,32 @@ func (c *defaultCredential) isAvailable() bool {
 	return !c.state.unavailable
 }
 
+func (c *defaultCredential) availabilityStatus() availabilityStatus {
+	c.stateAccess.RLock()
+	defer c.stateAccess.RUnlock()
+	return c.state.currentAvailability()
+}
+
+func (c *defaultCredential) rateLimitSnapshots() []rateLimitSnapshot {
+	c.stateAccess.RLock()
+	defer c.stateAccess.RUnlock()
+	if len(c.state.rateLimitSnapshots) == 0 {
+		return nil
+	}
+	snapshots := make([]rateLimitSnapshot, 0, len(c.state.rateLimitSnapshots))
+	for _, snapshot := range c.state.rateLimitSnapshots {
+		snapshots = append(snapshots, cloneRateLimitSnapshot(snapshot))
+	}
+	sortRateLimitSnapshots(snapshots)
+	return snapshots
+}
+
+func (c *defaultCredential) activeLimitID() string {
+	c.stateAccess.RLock()
+	defer c.stateAccess.RUnlock()
+	return c.state.activeLimitID
+}
+
 func (c *defaultCredential) unavailableError() error {
 	c.stateAccess.RLock()
 	defer c.stateAccess.RUnlock()
@@ -542,6 +591,7 @@ func (c *defaultCredential) markUsagePollAttempted() {
 func (c *defaultCredential) incrementPollFailures() {
 	c.stateAccess.Lock()
 	c.state.consecutivePollFailures++
+	c.state.setAvailability(availabilityStateTemporarilyBlocked, availabilityReasonPollFailed, time.Time{})
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
 	if shouldInterrupt {
@@ -696,17 +746,7 @@ func (c *defaultCredential) pollUsage() {
 		return
 	}
 
-	type usageWindow struct {
-		UsedPercent float64 `json:"used_percent"`
-		ResetAt     int64   `json:"reset_at"`
-	}
-	var usageResponse struct {
-		PlanType  string `json:"plan_type"`
-		RateLimit *struct {
-			PrimaryWindow   *usageWindow `json:"primary_window"`
-			SecondaryWindow *usageWindow `json:"secondary_window"`
-		} `json:"rate_limit"`
-	}
+	var usageResponse usageRateLimitStatusPayload
 	err = json.NewDecoder(response.Body).Decode(&usageResponse)
 	if err != nil {
 		c.logger.Debug("poll usage for ", c.tag, ": decode: ", err)
@@ -720,26 +760,11 @@ func (c *defaultCredential) pollUsage() {
 	oldWeekly := c.state.weeklyUtilization
 	c.state.consecutivePollFailures = 0
 	c.state.usageAPIRetryDelay = 0
-	if usageResponse.RateLimit != nil {
-		if w := usageResponse.RateLimit.PrimaryWindow; w != nil {
-			c.state.fiveHourUtilization = w.UsedPercent
-			if w.ResetAt > 0 {
-				c.state.fiveHourReset = time.Unix(w.ResetAt, 0)
-			}
-		}
-		if w := usageResponse.RateLimit.SecondaryWindow; w != nil {
-			c.state.weeklyUtilization = w.UsedPercent
-			if w.ResetAt > 0 {
-				c.state.weeklyReset = time.Unix(w.ResetAt, 0)
-			}
-		}
-	}
-	if usageResponse.PlanType != "" {
-		c.state.accountType = usageResponse.PlanType
-	}
+	applyRateLimitSnapshotsLocked(&c.state, snapshotsFromUsagePayload(usageResponse), c.state.activeLimitID, c.state.remotePlanWeight, usageResponse.PlanType)
 	if c.state.hardRateLimited && time.Now().After(c.state.rateLimitResetAt) {
 		c.state.hardRateLimited = false
 	}
+	c.state.noteSnapshotData()
 	if isFirstUpdate || int(c.state.fiveHourUtilization*100) != int(oldFiveHour*100) || int(c.state.weeklyUtilization*100) != int(oldWeekly*100) {
 		resetSuffix := ""
 		if !c.state.weeklyReset.IsZero() {

@@ -105,6 +105,10 @@ func writeCredentialUnavailableError(
 		writeRetryableUsageError(w, r)
 		return
 	}
+	if provider != nil && strings.HasPrefix(allCredentialsUnavailableError(provider.allCredentials()).Error(), "all credentials rate-limited") {
+		writeRetryableUsageError(w, r)
+		return
+	}
 	writeNonRetryableCredentialError(w, r, unavailableCredentialMessage(provider, fallback))
 }
 

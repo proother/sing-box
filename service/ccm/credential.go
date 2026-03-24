@@ -59,6 +59,17 @@ type credentialState struct {
 	weeklyReset               time.Time
 	hardRateLimited           bool
 	rateLimitResetAt          time.Time
+	availabilityState         availabilityState
+	availabilityReason        availabilityReason
+	availabilityResetAt       time.Time
+	lastKnownDataAt           time.Time
+	unifiedStatus             unifiedRateLimitStatus
+	unifiedResetAt            time.Time
+	representativeClaim       string
+	unifiedFallbackAvailable  bool
+	overageStatus             string
+	overageResetAt            time.Time
+	overageDisabledReason     string
 	accountUUID               string
 	accountType               string
 	rateLimitTier             string
@@ -103,6 +114,7 @@ type Credential interface {
 	isAvailable() bool
 	isUsable() bool
 	isExternal() bool
+	hasSnapshotData() bool
 	fiveHourUtilization() float64
 	weeklyUtilization() float64
 	fiveHourCap() float64
@@ -112,6 +124,8 @@ type Credential interface {
 	weeklyResetTime() time.Time
 	markRateLimited(resetAt time.Time)
 	markUpstreamRejected()
+	availabilityStatus() availabilityStatus
+	unifiedRateLimitState() unifiedRateLimitInfo
 	earliestReset() time.Time
 	unavailableError() error
 
@@ -183,6 +197,71 @@ func parseRequiredAnthropicResetHeader(headers http.Header, headerName string) t
 		panic("missing required " + headerName + " header")
 	}
 	return parseAnthropicResetHeaderValue(headerName, headerValue)
+}
+
+func (s *credentialState) noteSnapshotData() {
+	s.lastKnownDataAt = time.Now()
+}
+
+func (s credentialState) hasSnapshotData() bool {
+	return !s.lastKnownDataAt.IsZero() ||
+		s.fiveHourUtilization > 0 ||
+		s.weeklyUtilization > 0 ||
+		!s.fiveHourReset.IsZero() ||
+		!s.weeklyReset.IsZero()
+}
+
+func (s *credentialState) setAvailability(state availabilityState, reason availabilityReason, resetAt time.Time) {
+	s.availabilityState = state
+	s.availabilityReason = reason
+	s.availabilityResetAt = resetAt
+}
+
+func (s credentialState) currentAvailability() availabilityStatus {
+	now := time.Now()
+	switch {
+	case s.unavailable:
+		return availabilityStatus{
+			State:   availabilityStateUnavailable,
+			Reason:  availabilityReasonUnknown,
+			ResetAt: s.availabilityResetAt,
+		}
+	case s.hardRateLimited && (s.rateLimitResetAt.IsZero() || now.Before(s.rateLimitResetAt)):
+		reason := s.availabilityReason
+		if reason == "" {
+			reason = availabilityReasonHardRateLimit
+		}
+		return availabilityStatus{
+			State:   availabilityStateRateLimited,
+			Reason:  reason,
+			ResetAt: s.rateLimitResetAt,
+		}
+	case !s.upstreamRejectedUntil.IsZero() && now.Before(s.upstreamRejectedUntil):
+		return availabilityStatus{
+			State:   availabilityStateTemporarilyBlocked,
+			Reason:  availabilityReasonUpstreamRejected,
+			ResetAt: s.upstreamRejectedUntil,
+		}
+	case s.consecutivePollFailures > 0:
+		return availabilityStatus{
+			State:  availabilityStateTemporarilyBlocked,
+			Reason: availabilityReasonPollFailed,
+		}
+	default:
+		return availabilityStatus{State: availabilityStateUsable}
+	}
+}
+
+func (s credentialState) currentUnifiedRateLimit() unifiedRateLimitInfo {
+	return unifiedRateLimitInfo{
+		Status:                s.unifiedStatus,
+		ResetAt:               s.unifiedResetAt,
+		RepresentativeClaim:   s.representativeClaim,
+		FallbackAvailable:     s.unifiedFallbackAvailable,
+		OverageStatus:         s.overageStatus,
+		OverageResetAt:        s.overageResetAt,
+		OverageDisabledReason: s.overageDisabledReason,
+	}.normalized()
 }
 
 func parseRateLimitResetFromHeaders(headers http.Header) time.Time {

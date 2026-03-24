@@ -65,7 +65,6 @@ func writePlainTextError(w http.ResponseWriter, statusCode int, message string) 
 
 const (
 	retryableUsageMessage = "current credential reached its usage limit; retry the request to use another credential"
-	retryableUsageCode    = "credential_usage_exhausted"
 )
 
 func hasAlternativeCredential(provider credentialProvider, currentCredential Credential, selection credentialSelection) bool {
@@ -98,7 +97,7 @@ func unavailableCredentialMessage(provider credentialProvider, fallback string) 
 }
 
 func writeRetryableUsageError(w http.ResponseWriter, r *http.Request) {
-	writeJSONErrorWithCode(w, r, http.StatusServiceUnavailable, "server_error", retryableUsageCode, retryableUsageMessage)
+	writeJSONErrorWithCode(w, r, http.StatusTooManyRequests, "usage_limit_reached", "", retryableUsageMessage)
 }
 
 func writeNonRetryableCredentialError(w http.ResponseWriter, message string) {
@@ -114,6 +113,10 @@ func writeCredentialUnavailableError(
 	fallback string,
 ) {
 	if hasAlternativeCredential(provider, currentCredential, selection) {
+		writeRetryableUsageError(w, r)
+		return
+	}
+	if provider != nil && strings.HasPrefix(allRateLimitedError(provider.allCredentials()).Error(), "all credentials rate-limited") {
 		writeRetryableUsageError(w, r)
 		return
 	}

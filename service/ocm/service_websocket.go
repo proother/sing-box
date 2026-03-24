@@ -430,9 +430,7 @@ func (s *Service) proxyWebSocketUpstreamToClient(ctx context.Context, upstreamRe
 					s.handleWebSocketRateLimitsEvent(data, selectedCredential)
 					continue
 				case "error":
-					if event.StatusCode == http.StatusTooManyRequests {
-						s.handleWebSocketErrorRateLimited(data, selectedCredential)
-					}
+					s.handleWebSocketErrorEvent(data, selectedCredential)
 				case "response.completed":
 					if usageTracker != nil {
 						select {
@@ -460,17 +458,22 @@ func (s *Service) proxyWebSocketUpstreamToClient(ctx context.Context, upstreamRe
 
 func (s *Service) handleWebSocketRateLimitsEvent(data []byte, selectedCredential Credential) {
 	var rateLimitsEvent struct {
-		RateLimits struct {
+		MeteredLimitName string `json:"metered_limit_name"`
+		LimitName        string `json:"limit_name"`
+		RateLimits       struct {
 			Primary *struct {
-				UsedPercent float64 `json:"used_percent"`
-				ResetAt     int64   `json:"reset_at"`
+				UsedPercent   float64 `json:"used_percent"`
+				WindowMinutes int64   `json:"window_minutes"`
+				ResetAt       int64   `json:"reset_at"`
 			} `json:"primary"`
 			Secondary *struct {
-				UsedPercent float64 `json:"used_percent"`
-				ResetAt     int64   `json:"reset_at"`
+				UsedPercent   float64 `json:"used_percent"`
+				WindowMinutes int64   `json:"window_minutes"`
+				ResetAt       int64   `json:"reset_at"`
 			} `json:"secondary"`
 		} `json:"rate_limits"`
-		PlanWeight float64 `json:"plan_weight"`
+		Credits    *creditsSnapshot `json:"credits"`
+		PlanWeight float64          `json:"plan_weight"`
 	}
 	err := json.Unmarshal(data, &rateLimitsEvent)
 	if err != nil {
@@ -478,17 +481,41 @@ func (s *Service) handleWebSocketRateLimitsEvent(data []byte, selectedCredential
 	}
 
 	headers := make(http.Header)
-	headers.Set("x-codex-active-limit", "codex")
+	limitID := rateLimitsEvent.MeteredLimitName
+	if limitID == "" {
+		limitID = rateLimitsEvent.LimitName
+	}
+	if limitID == "" {
+		limitID = "codex"
+	}
+	headerLimit := headerLimitID(limitID)
+	headers.Set("x-codex-active-limit", headerLimit)
 	if w := rateLimitsEvent.RateLimits.Primary; w != nil {
-		headers.Set("x-codex-primary-used-percent", strconv.FormatFloat(w.UsedPercent, 'f', -1, 64))
+		headers.Set("x-"+headerLimit+"-primary-used-percent", strconv.FormatFloat(w.UsedPercent, 'f', -1, 64))
+		if w.WindowMinutes > 0 {
+			headers.Set("x-"+headerLimit+"-primary-window-minutes", strconv.FormatInt(w.WindowMinutes, 10))
+		}
 		if w.ResetAt > 0 {
-			headers.Set("x-codex-primary-reset-at", strconv.FormatInt(w.ResetAt, 10))
+			headers.Set("x-"+headerLimit+"-primary-reset-at", strconv.FormatInt(w.ResetAt, 10))
 		}
 	}
 	if w := rateLimitsEvent.RateLimits.Secondary; w != nil {
-		headers.Set("x-codex-secondary-used-percent", strconv.FormatFloat(w.UsedPercent, 'f', -1, 64))
+		headers.Set("x-"+headerLimit+"-secondary-used-percent", strconv.FormatFloat(w.UsedPercent, 'f', -1, 64))
+		if w.WindowMinutes > 0 {
+			headers.Set("x-"+headerLimit+"-secondary-window-minutes", strconv.FormatInt(w.WindowMinutes, 10))
+		}
 		if w.ResetAt > 0 {
-			headers.Set("x-codex-secondary-reset-at", strconv.FormatInt(w.ResetAt, 10))
+			headers.Set("x-"+headerLimit+"-secondary-reset-at", strconv.FormatInt(w.ResetAt, 10))
+		}
+	}
+	if rateLimitsEvent.LimitName != "" {
+		headers.Set("x-"+headerLimit+"-limit-name", rateLimitsEvent.LimitName)
+	}
+	if rateLimitsEvent.Credits != nil && normalizeStoredLimitID(limitID) == "codex" {
+		headers.Set("x-codex-credits-has-credits", strconv.FormatBool(rateLimitsEvent.Credits.HasCredits))
+		headers.Set("x-codex-credits-unlimited", strconv.FormatBool(rateLimitsEvent.Credits.Unlimited))
+		if rateLimitsEvent.Credits.Balance != "" {
+			headers.Set("x-codex-credits-balance", rateLimitsEvent.Credits.Balance)
 		}
 	}
 	if rateLimitsEvent.PlanWeight > 0 {
@@ -497,12 +524,23 @@ func (s *Service) handleWebSocketRateLimitsEvent(data []byte, selectedCredential
 	selectedCredential.updateStateFromHeaders(headers)
 }
 
-func (s *Service) handleWebSocketErrorRateLimited(data []byte, selectedCredential Credential) {
+func (s *Service) handleWebSocketErrorEvent(data []byte, selectedCredential Credential) {
 	var errorEvent struct {
-		Headers map[string]string `json:"headers"`
+		StatusCode int               `json:"status_code"`
+		Headers    map[string]string `json:"headers"`
+		Error      struct {
+			Code string `json:"code"`
+		} `json:"error"`
 	}
 	err := json.Unmarshal(data, &errorEvent)
 	if err != nil {
+		return
+	}
+	if errorEvent.StatusCode == http.StatusBadRequest && errorEvent.Error.Code == "websocket_connection_limit_reached" {
+		selectedCredential.markTemporarilyBlocked(availabilityReasonConnectionLimit, time.Now().Add(time.Minute))
+		return
+	}
+	if errorEvent.StatusCode != http.StatusTooManyRequests {
 		return
 	}
 	headers := make(http.Header)
@@ -515,10 +553,14 @@ func (s *Service) handleWebSocketErrorRateLimited(data []byte, selectedCredentia
 }
 
 func writeWebSocketAggregatedStatus(clientConn net.Conn, clientWriteAccess *sync.Mutex, status aggregatedStatus) error {
-	data := buildSyntheticRateLimitsEvent(status)
 	clientWriteAccess.Lock()
 	defer clientWriteAccess.Unlock()
-	return wsutil.WriteServerMessage(clientConn, ws.OpText, data)
+	for _, data := range buildSyntheticRateLimitsEvents(status) {
+		if err := wsutil.WriteServerMessage(clientConn, ws.OpText, data); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn net.Conn, clientWriteAccess *sync.Mutex, sessionClosed <-chan struct{}, firstRealRequest <-chan struct{}, provider credentialProvider, userConfig *option.OCMUser) {
@@ -573,34 +615,106 @@ func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn 
 	}
 }
 
-func buildSyntheticRateLimitsEvent(status aggregatedStatus) []byte {
+func buildSyntheticRateLimitsEvents(status aggregatedStatus) [][]byte {
 	type rateLimitWindow struct {
-		UsedPercent float64 `json:"used_percent"`
-		ResetAt     int64   `json:"reset_at,omitempty"`
+		UsedPercent   float64 `json:"used_percent"`
+		WindowMinutes int64   `json:"window_minutes,omitempty"`
+		ResetAt       int64   `json:"reset_at,omitempty"`
 	}
-	event := struct {
+	type creditsEvent struct {
+		HasCredits bool   `json:"has_credits"`
+		Unlimited  bool   `json:"unlimited"`
+		Balance    string `json:"balance,omitempty"`
+	}
+	type eventPayload struct {
 		Type       string `json:"type"`
 		RateLimits struct {
 			Primary   *rateLimitWindow `json:"primary,omitempty"`
 			Secondary *rateLimitWindow `json:"secondary,omitempty"`
 		} `json:"rate_limits"`
-		LimitName  string  `json:"limit_name"`
-		PlanWeight float64 `json:"plan_weight,omitempty"`
-	}{
-		Type:       "codex.rate_limits",
-		LimitName:  "codex",
-		PlanWeight: status.totalWeight,
+		MeteredLimitName string        `json:"metered_limit_name,omitempty"`
+		LimitName        string        `json:"limit_name,omitempty"`
+		Credits          *creditsEvent `json:"credits,omitempty"`
+		PlanWeight       float64       `json:"plan_weight,omitempty"`
 	}
-	event.RateLimits.Primary = &rateLimitWindow{
+	buildEvent := func(snapshot rateLimitSnapshot, primary *rateLimitWindow, secondary *rateLimitWindow) []byte {
+		event := eventPayload{
+			Type:             "codex.rate_limits",
+			MeteredLimitName: snapshot.LimitID,
+			LimitName:        snapshot.LimitName,
+			PlanWeight:       status.totalWeight,
+		}
+		if event.MeteredLimitName == "" {
+			event.MeteredLimitName = "codex"
+		}
+		if event.LimitName == "" {
+			event.LimitName = strings.ReplaceAll(event.MeteredLimitName, "_", "-")
+		}
+		event.RateLimits.Primary = primary
+		event.RateLimits.Secondary = secondary
+		if snapshot.Credits != nil {
+			event.Credits = &creditsEvent{
+				HasCredits: snapshot.Credits.HasCredits,
+				Unlimited:  snapshot.Credits.Unlimited,
+				Balance:    snapshot.Credits.Balance,
+			}
+		}
+		data, _ := json.Marshal(event)
+		return data
+	}
+	defaultPrimary := &rateLimitWindow{
 		UsedPercent: status.fiveHourUtilization,
 		ResetAt:     resetToEpoch(status.fiveHourReset),
 	}
-	event.RateLimits.Secondary = &rateLimitWindow{
+	defaultSecondary := &rateLimitWindow{
 		UsedPercent: status.weeklyUtilization,
 		ResetAt:     resetToEpoch(status.weeklyReset),
 	}
-	data, _ := json.Marshal(event)
-	return data
+	events := make([][]byte, 0, 1+len(status.limits))
+	if snapshot := findSnapshotByLimitID(status.limits, "codex"); snapshot != nil {
+		primary := defaultPrimary
+		if snapshot.Primary != nil {
+			primary = &rateLimitWindow{
+				UsedPercent:   snapshot.Primary.UsedPercent,
+				WindowMinutes: snapshot.Primary.WindowMinutes,
+				ResetAt:       snapshot.Primary.ResetAt,
+			}
+		}
+		secondary := defaultSecondary
+		if snapshot.Secondary != nil {
+			secondary = &rateLimitWindow{
+				UsedPercent:   snapshot.Secondary.UsedPercent,
+				WindowMinutes: snapshot.Secondary.WindowMinutes,
+				ResetAt:       snapshot.Secondary.ResetAt,
+			}
+		}
+		events = append(events, buildEvent(*snapshot, primary, secondary))
+	} else {
+		events = append(events, buildEvent(rateLimitSnapshot{LimitID: "codex", LimitName: "codex"}, defaultPrimary, defaultSecondary))
+	}
+	for _, snapshot := range status.limits {
+		if snapshot.LimitID == "codex" {
+			continue
+		}
+		var primary *rateLimitWindow
+		if snapshot.Primary != nil {
+			primary = &rateLimitWindow{
+				UsedPercent:   snapshot.Primary.UsedPercent,
+				WindowMinutes: snapshot.Primary.WindowMinutes,
+				ResetAt:       snapshot.Primary.ResetAt,
+			}
+		}
+		var secondary *rateLimitWindow
+		if snapshot.Secondary != nil {
+			secondary = &rateLimitWindow{
+				UsedPercent:   snapshot.Secondary.UsedPercent,
+				WindowMinutes: snapshot.Secondary.WindowMinutes,
+				ResetAt:       snapshot.Secondary.ResetAt,
+			}
+		}
+		events = append(events, buildEvent(snapshot, primary, secondary))
+	}
+	return events
 }
 
 func (s *Service) handleWebSocketResponseCompleted(data []byte, usageTracker *AggregatedUsage, requestModel string, username string, weeklyCycleHint *WeeklyCycleHint) {

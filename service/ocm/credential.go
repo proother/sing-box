@@ -61,8 +61,14 @@ type credentialState struct {
 	weeklyReset               time.Time
 	hardRateLimited           bool
 	rateLimitResetAt          time.Time
+	availabilityState         availabilityState
+	availabilityReason        availabilityReason
+	availabilityResetAt       time.Time
+	lastKnownDataAt           time.Time
 	accountType               string
 	remotePlanWeight          float64
+	activeLimitID             string
+	rateLimitSnapshots        map[string]rateLimitSnapshot
 	lastUpdated               time.Time
 	consecutivePollFailures   int
 	usageAPIRetryDelay        time.Duration
@@ -102,6 +108,7 @@ type Credential interface {
 	isAvailable() bool
 	isUsable() bool
 	isExternal() bool
+	hasSnapshotData() bool
 	fiveHourUtilization() float64
 	weeklyUtilization() float64
 	fiveHourCap() float64
@@ -111,6 +118,10 @@ type Credential interface {
 	fiveHourResetTime() time.Time
 	markRateLimited(resetAt time.Time)
 	markUpstreamRejected()
+	markTemporarilyBlocked(reason availabilityReason, resetAt time.Time)
+	availabilityStatus() availabilityStatus
+	rateLimitSnapshots() []rateLimitSnapshot
+	activeLimitID() string
 	earliestReset() time.Time
 	unavailableError() error
 
@@ -199,4 +210,68 @@ func parseOCMRateLimitResetFromHeaders(headers http.Header) time.Time {
 		}
 	}
 	return time.Now().Add(5 * time.Minute)
+}
+
+func (s *credentialState) noteSnapshotData() {
+	s.lastKnownDataAt = time.Now()
+}
+
+func (s credentialState) hasSnapshotData() bool {
+	return !s.lastKnownDataAt.IsZero() ||
+		s.fiveHourUtilization > 0 ||
+		s.weeklyUtilization > 0 ||
+		!s.fiveHourReset.IsZero() ||
+		!s.weeklyReset.IsZero() ||
+		len(s.rateLimitSnapshots) > 0
+}
+
+func (s *credentialState) setAvailability(state availabilityState, reason availabilityReason, resetAt time.Time) {
+	s.availabilityState = state
+	s.availabilityReason = reason
+	s.availabilityResetAt = resetAt
+}
+
+func (s credentialState) currentAvailability() availabilityStatus {
+	now := time.Now()
+	switch {
+	case s.unavailable:
+		return availabilityStatus{
+			State:  availabilityStateUnavailable,
+			Reason: availabilityReasonUnknown,
+		}
+	case s.availabilityState == availabilityStateTemporarilyBlocked &&
+		(s.availabilityResetAt.IsZero() || now.Before(s.availabilityResetAt)):
+		reason := s.availabilityReason
+		if reason == "" {
+			reason = availabilityReasonUnknown
+		}
+		return availabilityStatus{
+			State:   availabilityStateTemporarilyBlocked,
+			Reason:  reason,
+			ResetAt: s.availabilityResetAt,
+		}
+	case s.hardRateLimited && (s.rateLimitResetAt.IsZero() || now.Before(s.rateLimitResetAt)):
+		reason := s.availabilityReason
+		if reason == "" {
+			reason = availabilityReasonHardRateLimit
+		}
+		return availabilityStatus{
+			State:   availabilityStateRateLimited,
+			Reason:  reason,
+			ResetAt: s.rateLimitResetAt,
+		}
+	case !s.upstreamRejectedUntil.IsZero() && now.Before(s.upstreamRejectedUntil):
+		return availabilityStatus{
+			State:   availabilityStateTemporarilyBlocked,
+			Reason:  availabilityReasonUpstreamRejected,
+			ResetAt: s.upstreamRejectedUntil,
+		}
+	case s.consecutivePollFailures > 0:
+		return availabilityStatus{
+			State:  availabilityStateTemporarilyBlocked,
+			Reason: availabilityReasonPollFailed,
+		}
+	default:
+		return availabilityStatus{State: availabilityStateUsable}
+	}
 }
