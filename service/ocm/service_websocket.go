@@ -570,11 +570,8 @@ func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn 
 	}
 	defer s.statusObserver.UnSubscribe(subscription)
 
-	last := s.computeAggregatedUtilization(provider, userConfig)
-	err = writeWebSocketAggregatedStatus(clientConn, clientWriteAccess, last)
-	if err != nil {
-		return
-	}
+	var last aggregatedStatus
+	hasLast := false
 
 	for {
 		select {
@@ -585,6 +582,13 @@ func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn 
 		case <-sessionClosed:
 			return
 		case <-firstRealRequest:
+			current := s.computeAggregatedUtilization(provider, userConfig)
+			err = writeWebSocketAggregatedStatus(clientConn, clientWriteAccess, current)
+			if err != nil {
+				return
+			}
+			last = current
+			hasLast = true
 			firstRealRequest = nil
 		case <-subscription:
 			for {
@@ -595,6 +599,9 @@ func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn 
 				}
 			}
 		drained:
+			if !hasLast {
+				continue
+			}
 			current := s.computeAggregatedUtilization(provider, userConfig)
 			if current.equal(last) {
 				continue
