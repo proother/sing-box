@@ -629,19 +629,6 @@ func (c *defaultCredential) updateStateFromHeaders(headers http.Header) {
 		c.state.lastUpdated = time.Now()
 		c.state.noteSnapshotData()
 	}
-	if unifiedStatus := unifiedRateLimitStatus(headers.Get("anthropic-ratelimit-unified-status")); unifiedStatus != "" {
-		c.state.unifiedStatus = unifiedStatus
-	}
-	if value, exists := parseOptionalAnthropicResetHeader(headers, "anthropic-ratelimit-unified-reset"); exists {
-		c.state.unifiedResetAt = value
-	}
-	c.state.representativeClaim = headers.Get("anthropic-ratelimit-unified-representative-claim")
-	c.state.unifiedFallbackAvailable = headers.Get("anthropic-ratelimit-unified-fallback") == "available"
-	c.state.overageStatus = headers.Get("anthropic-ratelimit-unified-overage-status")
-	if value, exists := parseOptionalAnthropicResetHeader(headers, "anthropic-ratelimit-unified-overage-reset"); exists {
-		c.state.overageResetAt = value
-	}
-	c.state.overageDisabledReason = headers.Get("anthropic-ratelimit-unified-overage-disabled-reason")
 	if isFirstUpdate || int(c.state.fiveHourUtilization*100) != int(oldFiveHour*100) || int(c.state.weeklyUtilization*100) != int(oldWeekly*100) {
 		resetSuffix := ""
 		if !c.state.weeklyReset.IsZero() {
@@ -666,8 +653,6 @@ func (c *defaultCredential) markRateLimited(resetAt time.Time) {
 	c.state.hardRateLimited = true
 	c.state.rateLimitResetAt = resetAt
 	c.state.setAvailability(availabilityStateRateLimited, availabilityReasonHardRateLimit, resetAt)
-	c.state.unifiedStatus = unifiedRateLimitStatusRejected
-	c.state.unifiedResetAt = resetAt
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
 	if shouldInterrupt {
@@ -798,12 +783,6 @@ func (c *defaultCredential) availabilityStatus() availabilityStatus {
 	c.stateAccess.RLock()
 	defer c.stateAccess.RUnlock()
 	return c.state.currentAvailability()
-}
-
-func (c *defaultCredential) unifiedRateLimitState() unifiedRateLimitInfo {
-	c.stateAccess.RLock()
-	defer c.stateAccess.RUnlock()
-	return c.state.currentUnifiedRateLimit()
 }
 
 func (c *defaultCredential) unavailableError() error {

@@ -24,28 +24,26 @@ type testCredential struct {
 	fiveReset    time.Time
 	weeklyReset  time.Time
 	availability availabilityStatus
-	unified      unifiedRateLimitInfo
 }
 
-func (c *testCredential) tagName() string                             { return c.tag }
-func (c *testCredential) isAvailable() bool                           { return c.available }
-func (c *testCredential) isUsable() bool                              { return c.usable }
-func (c *testCredential) isExternal() bool                            { return c.external }
-func (c *testCredential) hasSnapshotData() bool                       { return c.hasData }
-func (c *testCredential) fiveHourUtilization() float64                { return c.fiveHour }
-func (c *testCredential) weeklyUtilization() float64                  { return c.weekly }
-func (c *testCredential) fiveHourCap() float64                        { return c.fiveHourCapV }
-func (c *testCredential) weeklyCap() float64                          { return c.weeklyCapV }
-func (c *testCredential) planWeight() float64                         { return c.weight }
-func (c *testCredential) fiveHourResetTime() time.Time                { return c.fiveReset }
-func (c *testCredential) weeklyResetTime() time.Time                  { return c.weeklyReset }
-func (c *testCredential) markRateLimited(time.Time)                   {}
-func (c *testCredential) markUpstreamRejected()                       {}
-func (c *testCredential) availabilityStatus() availabilityStatus      { return c.availability }
-func (c *testCredential) unifiedRateLimitState() unifiedRateLimitInfo { return c.unified }
-func (c *testCredential) earliestReset() time.Time                    { return c.fiveReset }
-func (c *testCredential) unavailableError() error                     { return nil }
-func (c *testCredential) getAccessToken() (string, error)             { return "", nil }
+func (c *testCredential) tagName() string                        { return c.tag }
+func (c *testCredential) isAvailable() bool                      { return c.available }
+func (c *testCredential) isUsable() bool                         { return c.usable }
+func (c *testCredential) isExternal() bool                       { return c.external }
+func (c *testCredential) hasSnapshotData() bool                  { return c.hasData }
+func (c *testCredential) fiveHourUtilization() float64           { return c.fiveHour }
+func (c *testCredential) weeklyUtilization() float64             { return c.weekly }
+func (c *testCredential) fiveHourCap() float64                   { return c.fiveHourCapV }
+func (c *testCredential) weeklyCap() float64                     { return c.weeklyCapV }
+func (c *testCredential) planWeight() float64                    { return c.weight }
+func (c *testCredential) fiveHourResetTime() time.Time           { return c.fiveReset }
+func (c *testCredential) weeklyResetTime() time.Time             { return c.weeklyReset }
+func (c *testCredential) markRateLimited(time.Time)              {}
+func (c *testCredential) markUpstreamRejected()                  {}
+func (c *testCredential) availabilityStatus() availabilityStatus { return c.availability }
+func (c *testCredential) earliestReset() time.Time               { return c.fiveReset }
+func (c *testCredential) unavailableError() error                { return nil }
+func (c *testCredential) getAccessToken() (string, error)        { return "", nil }
 func (c *testCredential) buildProxyRequest(context.Context, *http.Request, []byte, http.Header) (*http.Request, error) {
 	return nil, nil
 }
@@ -98,22 +96,18 @@ func TestComputeAggregatedUtilizationPreservesSnapshotForRateLimitedCredential(t
 			fiveReset:    reset,
 			weeklyReset:  reset.Add(2 * time.Hour),
 			availability: availabilityStatus{State: availabilityStateRateLimited, Reason: availabilityReasonHardRateLimit, ResetAt: reset},
-			unified:      unifiedRateLimitInfo{Status: unifiedRateLimitStatusRejected, ResetAt: reset, RepresentativeClaim: "5h"},
 		},
 	}}, nil)
 
 	if status.fiveHourUtilization != 42 || status.weeklyUtilization != 18 {
 		t.Fatalf("expected preserved utilization, got 5h=%v weekly=%v", status.fiveHourUtilization, status.weeklyUtilization)
 	}
-	if status.unifiedRateLimit.Status != unifiedRateLimitStatusRejected {
-		t.Fatalf("expected rejected unified status, got %q", status.unifiedRateLimit.Status)
-	}
 	if status.availability.State != availabilityStateRateLimited {
 		t.Fatalf("expected rate-limited availability, got %#v", status.availability)
 	}
 }
 
-func TestRewriteResponseHeadersIncludesUnifiedHeaders(t *testing.T) {
+func TestRewriteResponseHeadersComputesUnifiedStatus(t *testing.T) {
 	t.Parallel()
 
 	reset := time.Now().Add(80 * time.Minute)
@@ -144,6 +138,73 @@ func TestRewriteResponseHeadersIncludesUnifiedHeaders(t *testing.T) {
 	}
 	if headers.Get("anthropic-ratelimit-unified-5h-surpassed-threshold") != "true" {
 		t.Fatalf("expected 5h threshold header")
+	}
+}
+
+func TestRewriteResponseHeadersStripsUpstreamHeaders(t *testing.T) {
+	t.Parallel()
+
+	service := &Service{}
+	headers := make(http.Header)
+	headers.Set("anthropic-ratelimit-unified-overage-status", "rejected")
+	headers.Set("anthropic-ratelimit-unified-overage-disabled-reason", "org_level_disabled")
+	headers.Set("anthropic-ratelimit-unified-fallback", "available")
+	service.rewriteResponseHeaders(headers, &testProvider{credentials: []Credential{
+		&testCredential{
+			tag:          "a",
+			available:    true,
+			usable:       true,
+			hasData:      true,
+			fiveHour:     10,
+			weekly:       5,
+			fiveHourCapV: 100,
+			weeklyCapV:   100,
+			weight:       1,
+			fiveReset:    time.Now().Add(3 * time.Hour),
+			weeklyReset:  time.Now().Add(5 * 24 * time.Hour),
+			availability: availabilityStatus{State: availabilityStateUsable},
+		},
+	}}, nil)
+
+	if headers.Get("anthropic-ratelimit-unified-overage-status") != "" {
+		t.Fatalf("expected overage-status stripped, got %q", headers.Get("anthropic-ratelimit-unified-overage-status"))
+	}
+	if headers.Get("anthropic-ratelimit-unified-overage-disabled-reason") != "" {
+		t.Fatalf("expected overage-disabled-reason stripped, got %q", headers.Get("anthropic-ratelimit-unified-overage-disabled-reason"))
+	}
+	if headers.Get("anthropic-ratelimit-unified-fallback") != "" {
+		t.Fatalf("expected fallback stripped, got %q", headers.Get("anthropic-ratelimit-unified-fallback"))
+	}
+	if headers.Get("anthropic-ratelimit-unified-status") != "allowed" {
+		t.Fatalf("expected allowed status, got %q", headers.Get("anthropic-ratelimit-unified-status"))
+	}
+}
+
+func TestRewriteResponseHeadersRejectedOnHardRateLimit(t *testing.T) {
+	t.Parallel()
+
+	reset := time.Now().Add(10 * time.Minute)
+	service := &Service{}
+	headers := make(http.Header)
+	service.rewriteResponseHeaders(headers, &testProvider{credentials: []Credential{
+		&testCredential{
+			tag:          "a",
+			available:    true,
+			usable:       false,
+			hasData:      true,
+			fiveHour:     50,
+			weekly:       20,
+			fiveHourCapV: 100,
+			weeklyCapV:   100,
+			weight:       1,
+			fiveReset:    reset,
+			weeklyReset:  time.Now().Add(5 * 24 * time.Hour),
+			availability: availabilityStatus{State: availabilityStateRateLimited, Reason: availabilityReasonHardRateLimit, ResetAt: reset},
+		},
+	}}, nil)
+
+	if headers.Get("anthropic-ratelimit-unified-status") != "rejected" {
+		t.Fatalf("expected rejected (hard rate limited), got %q", headers.Get("anthropic-ratelimit-unified-status"))
 	}
 }
 

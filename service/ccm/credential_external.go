@@ -337,8 +337,6 @@ func (c *externalCredential) markRateLimited(resetAt time.Time) {
 	c.state.hardRateLimited = true
 	c.state.rateLimitResetAt = resetAt
 	c.state.setAvailability(availabilityStateRateLimited, availabilityReasonHardRateLimit, resetAt)
-	c.state.unifiedStatus = unifiedRateLimitStatusRejected
-	c.state.unifiedResetAt = resetAt
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
 	if shouldInterrupt {
@@ -492,19 +490,6 @@ func (c *externalCredential) updateStateFromHeaders(headers http.Header) {
 		c.state.lastUpdated = time.Now()
 		c.state.noteSnapshotData()
 	}
-	if unifiedStatus := unifiedRateLimitStatus(headers.Get("anthropic-ratelimit-unified-status")); unifiedStatus != "" {
-		c.state.unifiedStatus = unifiedStatus
-	}
-	if value, exists := parseOptionalAnthropicResetHeader(headers, "anthropic-ratelimit-unified-reset"); exists {
-		c.state.unifiedResetAt = value
-	}
-	c.state.representativeClaim = headers.Get("anthropic-ratelimit-unified-representative-claim")
-	c.state.unifiedFallbackAvailable = headers.Get("anthropic-ratelimit-unified-fallback") == "available"
-	c.state.overageStatus = headers.Get("anthropic-ratelimit-unified-overage-status")
-	if value, exists := parseOptionalAnthropicResetHeader(headers, "anthropic-ratelimit-unified-overage-reset"); exists {
-		c.state.overageResetAt = value
-	}
-	c.state.overageDisabledReason = headers.Get("anthropic-ratelimit-unified-overage-disabled-reason")
 	if isFirstUpdate || int(c.state.fiveHourUtilization*100) != int(oldFiveHour*100) || int(c.state.weeklyUtilization*100) != int(oldWeekly*100) {
 		resetSuffix := ""
 		if !c.state.weeklyReset.IsZero() {
@@ -662,11 +647,6 @@ func (c *externalCredential) pollUsage() {
 	c.state.upstreamRejectedUntil = time.Time{}
 	c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
 	c.state.weeklyUtilization = statusResponse.WeeklyUtilization
-	c.state.unifiedStatus = unifiedRateLimitStatus(statusResponse.UnifiedStatus)
-	c.state.representativeClaim = statusResponse.RepresentativeClaim
-	c.state.unifiedFallbackAvailable = statusResponse.FallbackAvailable
-	c.state.overageStatus = statusResponse.OverageStatus
-	c.state.overageDisabledReason = statusResponse.OverageDisabledReason
 	if statusResponse.PlanWeight > 0 {
 		c.state.remotePlanWeight = statusResponse.PlanWeight
 	}
@@ -675,30 +655,6 @@ func (c *externalCredential) pollUsage() {
 	}
 	if statusResponse.WeeklyReset > 0 {
 		c.state.weeklyReset = time.Unix(statusResponse.WeeklyReset, 0)
-	}
-	if statusResponse.UnifiedReset > 0 {
-		c.state.unifiedResetAt = time.Unix(statusResponse.UnifiedReset, 0)
-	}
-	if statusResponse.OverageReset > 0 {
-		c.state.overageResetAt = time.Unix(statusResponse.OverageReset, 0)
-	}
-	if statusResponse.Availability != nil {
-		switch availabilityState(statusResponse.Availability.State) {
-		case availabilityStateRateLimited:
-			c.state.hardRateLimited = true
-			if statusResponse.Availability.ResetAt > 0 {
-				c.state.rateLimitResetAt = time.Unix(statusResponse.Availability.ResetAt, 0)
-			}
-		case availabilityStateTemporarilyBlocked:
-			resetAt := time.Time{}
-			if statusResponse.Availability.ResetAt > 0 {
-				resetAt = time.Unix(statusResponse.Availability.ResetAt, 0)
-			}
-			c.state.setAvailability(availabilityStateTemporarilyBlocked, availabilityReason(statusResponse.Availability.Reason), resetAt)
-			if availabilityReason(statusResponse.Availability.Reason) == availabilityReasonUpstreamRejected && !resetAt.IsZero() {
-				c.state.upstreamRejectedUntil = resetAt
-			}
-		}
 	}
 	if c.state.hardRateLimited && time.Now().After(c.state.rateLimitResetAt) {
 		c.state.hardRateLimited = false
@@ -800,11 +756,6 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 		c.state.upstreamRejectedUntil = time.Time{}
 		c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
 		c.state.weeklyUtilization = statusResponse.WeeklyUtilization
-		c.state.unifiedStatus = unifiedRateLimitStatus(statusResponse.UnifiedStatus)
-		c.state.representativeClaim = statusResponse.RepresentativeClaim
-		c.state.unifiedFallbackAvailable = statusResponse.FallbackAvailable
-		c.state.overageStatus = statusResponse.OverageStatus
-		c.state.overageDisabledReason = statusResponse.OverageDisabledReason
 		if statusResponse.PlanWeight > 0 {
 			c.state.remotePlanWeight = statusResponse.PlanWeight
 		}
@@ -813,30 +764,6 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 		}
 		if statusResponse.WeeklyReset > 0 {
 			c.state.weeklyReset = time.Unix(statusResponse.WeeklyReset, 0)
-		}
-		if statusResponse.UnifiedReset > 0 {
-			c.state.unifiedResetAt = time.Unix(statusResponse.UnifiedReset, 0)
-		}
-		if statusResponse.OverageReset > 0 {
-			c.state.overageResetAt = time.Unix(statusResponse.OverageReset, 0)
-		}
-		if statusResponse.Availability != nil {
-			switch availabilityState(statusResponse.Availability.State) {
-			case availabilityStateRateLimited:
-				c.state.hardRateLimited = true
-				if statusResponse.Availability.ResetAt > 0 {
-					c.state.rateLimitResetAt = time.Unix(statusResponse.Availability.ResetAt, 0)
-				}
-			case availabilityStateTemporarilyBlocked:
-				resetAt := time.Time{}
-				if statusResponse.Availability.ResetAt > 0 {
-					resetAt = time.Unix(statusResponse.Availability.ResetAt, 0)
-				}
-				c.state.setAvailability(availabilityStateTemporarilyBlocked, availabilityReason(statusResponse.Availability.Reason), resetAt)
-				if availabilityReason(statusResponse.Availability.Reason) == availabilityReasonUpstreamRejected && !resetAt.IsZero() {
-					c.state.upstreamRejectedUntil = resetAt
-				}
-			}
 		}
 		if c.state.hardRateLimited && time.Now().After(c.state.rateLimitResetAt) {
 			c.state.hardRateLimited = false
@@ -921,11 +848,6 @@ func (c *externalCredential) availabilityStatus() availabilityStatus {
 	return c.state.currentAvailability()
 }
 
-func (c *externalCredential) unifiedRateLimitState() unifiedRateLimitInfo {
-	c.stateAccess.RLock()
-	defer c.stateAccess.RUnlock()
-	return c.state.currentUnifiedRateLimit()
-}
 
 func (c *externalCredential) markUsageStreamUpdated() {
 	c.stateAccess.Lock()

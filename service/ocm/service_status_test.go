@@ -26,8 +26,6 @@ type testCredential struct {
 	fiveReset    time.Time
 	weeklyReset  time.Time
 	availability availabilityStatus
-	activeLimit  string
-	snapshots    []rateLimitSnapshot
 }
 
 func (c *testCredential) tagName() string              { return c.tag }
@@ -48,10 +46,6 @@ func (c *testCredential) markTemporarilyBlocked(reason availabilityReason, reset
 	c.availability = availabilityStatus{State: availabilityStateTemporarilyBlocked, Reason: reason, ResetAt: resetAt}
 }
 func (c *testCredential) availabilityStatus() availabilityStatus { return c.availability }
-func (c *testCredential) rateLimitSnapshots() []rateLimitSnapshot {
-	return slicesCloneSnapshots(c.snapshots)
-}
-func (c *testCredential) activeLimitID() string           { return c.activeLimit }
 func (c *testCredential) earliestReset() time.Time        { return c.fiveReset }
 func (c *testCredential) unavailableError() error         { return nil }
 func (c *testCredential) getAccessToken() (string, error) { return "", nil }
@@ -75,17 +69,6 @@ func (c *testCredential) ocmIsAPIKeyMode() bool                                 
 func (c *testCredential) ocmGetAccountID() string                                      { return "" }
 func (c *testCredential) ocmGetBaseURL() string                                        { return "" }
 
-func slicesCloneSnapshots(snapshots []rateLimitSnapshot) []rateLimitSnapshot {
-	if len(snapshots) == 0 {
-		return nil
-	}
-	cloned := make([]rateLimitSnapshot, 0, len(snapshots))
-	for _, snapshot := range snapshots {
-		cloned = append(cloned, cloneRateLimitSnapshot(snapshot))
-	}
-	return cloned
-}
-
 type testProvider struct {
 	credentials []Credential
 }
@@ -103,78 +86,6 @@ func (p *testProvider) pollIfStale()                     {}
 func (p *testProvider) pollCredentialIfStale(Credential) {}
 func (p *testProvider) allCredentials() []Credential     { return p.credentials }
 func (p *testProvider) close()                           {}
-
-func TestComputeAggregatedUtilizationPreservesStoredSnapshots(t *testing.T) {
-	t.Parallel()
-
-	service := &Service{}
-	status := service.computeAggregatedUtilization(&testProvider{credentials: []Credential{
-		&testCredential{
-			tag:          "a",
-			available:    true,
-			usable:       false,
-			hasData:      true,
-			weight:       1,
-			activeLimit:  "codex",
-			availability: availabilityStatus{State: availabilityStateRateLimited, Reason: availabilityReasonHardRateLimit, ResetAt: time.Now().Add(time.Minute)},
-			snapshots: []rateLimitSnapshot{
-				{
-					LimitID:   "codex",
-					Primary:   &rateLimitWindow{UsedPercent: 44, WindowMinutes: 300, ResetAt: time.Now().Add(time.Hour).Unix()},
-					Secondary: &rateLimitWindow{UsedPercent: 12, WindowMinutes: 10080, ResetAt: time.Now().Add(24 * time.Hour).Unix()},
-				},
-			},
-		},
-	}}, nil)
-
-	if status.fiveHourUtilization != 44 || status.weeklyUtilization != 12 {
-		t.Fatalf("expected stored snapshot utilization, got 5h=%v weekly=%v", status.fiveHourUtilization, status.weeklyUtilization)
-	}
-	if status.availability.State != availabilityStateRateLimited {
-		t.Fatalf("expected rate-limited availability, got %#v", status.availability)
-	}
-}
-
-func TestRewriteResponseHeadersIncludesAdditionalLimitFamiliesAndCredits(t *testing.T) {
-	t.Parallel()
-
-	service := &Service{}
-	headers := make(http.Header)
-	service.rewriteResponseHeaders(headers, &testProvider{credentials: []Credential{
-		&testCredential{
-			tag:          "a",
-			available:    true,
-			usable:       true,
-			hasData:      true,
-			weight:       1,
-			activeLimit:  "codex_other",
-			availability: availabilityStatus{State: availabilityStateUsable},
-			snapshots: []rateLimitSnapshot{
-				{
-					LimitID:   "codex",
-					Primary:   &rateLimitWindow{UsedPercent: 20, WindowMinutes: 300, ResetAt: time.Now().Add(time.Hour).Unix()},
-					Secondary: &rateLimitWindow{UsedPercent: 40, WindowMinutes: 10080, ResetAt: time.Now().Add(24 * time.Hour).Unix()},
-					Credits:   &creditsSnapshot{HasCredits: true, Unlimited: false, Balance: "12"},
-				},
-				{
-					LimitID:   "codex_other",
-					LimitName: "codex-other",
-					Primary:   &rateLimitWindow{UsedPercent: 60, WindowMinutes: 60, ResetAt: time.Now().Add(30 * time.Minute).Unix()},
-				},
-			},
-		},
-	}}, nil)
-
-	if headers.Get("x-codex-active-limit") != "codex-other" {
-		t.Fatalf("expected active limit header, got %q", headers.Get("x-codex-active-limit"))
-	}
-	if headers.Get("x-codex-other-primary-used-percent") == "" {
-		t.Fatal("expected additional rate-limit family header")
-	}
-	if headers.Get("x-codex-credits-balance") != "12" {
-		t.Fatalf("expected credits balance header, got %q", headers.Get("x-codex-credits-balance"))
-	}
-}
 
 func TestHandleWebSocketErrorEventConnectionLimitDoesNotUseRateLimitPath(t *testing.T) {
 	t.Parallel()
@@ -201,7 +112,6 @@ func TestWriteCredentialUnavailableErrorReturns429ForRateLimitedCredentials(t *t
 			hasData:      true,
 			weight:       1,
 			availability: availabilityStatus{State: availabilityStateRateLimited, Reason: availabilityReasonHardRateLimit, ResetAt: time.Now().Add(time.Minute)},
-			snapshots:    []rateLimitSnapshot{{LimitID: "codex", Primary: &rateLimitWindow{UsedPercent: 80}}},
 		},
 	}}
 

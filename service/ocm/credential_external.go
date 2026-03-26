@@ -702,38 +702,16 @@ func (c *externalCredential) pollUsage() {
 	oldWeekly := c.state.weeklyUtilization
 	c.state.consecutivePollFailures = 0
 	c.state.upstreamRejectedUntil = time.Time{}
-	if len(statusResponse.Limits) > 0 {
-		applyRateLimitSnapshotsLocked(&c.state, statusResponse.Limits, statusResponse.ActiveLimit, statusResponse.PlanWeight, c.state.accountType)
-	} else {
-		c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
-		c.state.weeklyUtilization = statusResponse.WeeklyUtilization
-		if statusResponse.FiveHourReset > 0 {
-			c.state.fiveHourReset = time.Unix(statusResponse.FiveHourReset, 0)
-		}
-		if statusResponse.WeeklyReset > 0 {
-			c.state.weeklyReset = time.Unix(statusResponse.WeeklyReset, 0)
-		}
-		if statusResponse.PlanWeight > 0 {
-			c.state.remotePlanWeight = statusResponse.PlanWeight
-		}
+	c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
+	c.state.weeklyUtilization = statusResponse.WeeklyUtilization
+	if statusResponse.FiveHourReset > 0 {
+		c.state.fiveHourReset = time.Unix(statusResponse.FiveHourReset, 0)
 	}
-	if statusResponse.Availability != nil {
-		switch availabilityState(statusResponse.Availability.State) {
-		case availabilityStateRateLimited:
-			c.state.hardRateLimited = true
-			if statusResponse.Availability.ResetAt > 0 {
-				c.state.rateLimitResetAt = time.Unix(statusResponse.Availability.ResetAt, 0)
-			}
-		case availabilityStateTemporarilyBlocked:
-			resetAt := time.Time{}
-			if statusResponse.Availability.ResetAt > 0 {
-				resetAt = time.Unix(statusResponse.Availability.ResetAt, 0)
-			}
-			c.state.setAvailability(availabilityStateTemporarilyBlocked, availabilityReason(statusResponse.Availability.Reason), resetAt)
-			if availabilityReason(statusResponse.Availability.Reason) == availabilityReasonUpstreamRejected && !resetAt.IsZero() {
-				c.state.upstreamRejectedUntil = resetAt
-			}
-		}
+	if statusResponse.WeeklyReset > 0 {
+		c.state.weeklyReset = time.Unix(statusResponse.WeeklyReset, 0)
+	}
+	if statusResponse.PlanWeight > 0 {
+		c.state.remotePlanWeight = statusResponse.PlanWeight
 	}
 	if c.state.hardRateLimited && time.Now().After(c.state.rateLimitResetAt) {
 		c.state.hardRateLimited = false
@@ -833,38 +811,16 @@ func (c *externalCredential) connectStatusStream(ctx context.Context) (statusStr
 		oldWeekly := c.state.weeklyUtilization
 		c.state.consecutivePollFailures = 0
 		c.state.upstreamRejectedUntil = time.Time{}
-		if len(statusResponse.Limits) > 0 {
-			applyRateLimitSnapshotsLocked(&c.state, statusResponse.Limits, statusResponse.ActiveLimit, statusResponse.PlanWeight, c.state.accountType)
-		} else {
-			c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
-			c.state.weeklyUtilization = statusResponse.WeeklyUtilization
-			if statusResponse.FiveHourReset > 0 {
-				c.state.fiveHourReset = time.Unix(statusResponse.FiveHourReset, 0)
-			}
-			if statusResponse.WeeklyReset > 0 {
-				c.state.weeklyReset = time.Unix(statusResponse.WeeklyReset, 0)
-			}
-			if statusResponse.PlanWeight > 0 {
-				c.state.remotePlanWeight = statusResponse.PlanWeight
-			}
+		c.state.fiveHourUtilization = statusResponse.FiveHourUtilization
+		c.state.weeklyUtilization = statusResponse.WeeklyUtilization
+		if statusResponse.FiveHourReset > 0 {
+			c.state.fiveHourReset = time.Unix(statusResponse.FiveHourReset, 0)
 		}
-		if statusResponse.Availability != nil {
-			switch availabilityState(statusResponse.Availability.State) {
-			case availabilityStateRateLimited:
-				c.state.hardRateLimited = true
-				if statusResponse.Availability.ResetAt > 0 {
-					c.state.rateLimitResetAt = time.Unix(statusResponse.Availability.ResetAt, 0)
-				}
-			case availabilityStateTemporarilyBlocked:
-				resetAt := time.Time{}
-				if statusResponse.Availability.ResetAt > 0 {
-					resetAt = time.Unix(statusResponse.Availability.ResetAt, 0)
-				}
-				c.state.setAvailability(availabilityStateTemporarilyBlocked, availabilityReason(statusResponse.Availability.Reason), resetAt)
-				if availabilityReason(statusResponse.Availability.Reason) == availabilityReasonUpstreamRejected && !resetAt.IsZero() {
-					c.state.upstreamRejectedUntil = resetAt
-				}
-			}
+		if statusResponse.WeeklyReset > 0 {
+			c.state.weeklyReset = time.Unix(statusResponse.WeeklyReset, 0)
+		}
+		if statusResponse.PlanWeight > 0 {
+			c.state.remotePlanWeight = statusResponse.PlanWeight
 		}
 		if c.state.hardRateLimited && time.Now().After(c.state.rateLimitResetAt) {
 			c.state.hardRateLimited = false
@@ -949,25 +905,6 @@ func (c *externalCredential) availabilityStatus() availabilityStatus {
 	return c.state.currentAvailability()
 }
 
-func (c *externalCredential) rateLimitSnapshots() []rateLimitSnapshot {
-	c.stateAccess.RLock()
-	defer c.stateAccess.RUnlock()
-	if len(c.state.rateLimitSnapshots) == 0 {
-		return nil
-	}
-	snapshots := make([]rateLimitSnapshot, 0, len(c.state.rateLimitSnapshots))
-	for _, snapshot := range c.state.rateLimitSnapshots {
-		snapshots = append(snapshots, cloneRateLimitSnapshot(snapshot))
-	}
-	sortRateLimitSnapshots(snapshots)
-	return snapshots
-}
-
-func (c *externalCredential) activeLimitID() string {
-	c.stateAccess.RLock()
-	defer c.stateAccess.RUnlock()
-	return c.state.activeLimitID
-}
 
 func (c *externalCredential) markUsageStreamUpdated() {
 	c.stateAccess.Lock()

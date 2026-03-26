@@ -29,60 +29,12 @@ type availabilityStatus struct {
 	ResetAt time.Time
 }
 
-type availabilityPayload struct {
-	State   string `json:"state"`
-	Reason  string `json:"reason,omitempty"`
-	ResetAt int64  `json:"reset_at,omitempty"`
-}
-
 func (s availabilityStatus) normalized() availabilityStatus {
 	if s.State == "" {
 		s.State = availabilityStateUnknown
 	}
 	if s.Reason == "" && s.State != availabilityStateUsable {
 		s.Reason = availabilityReasonUnknown
-	}
-	return s
-}
-
-func (s availabilityStatus) toPayload() *availabilityPayload {
-	s = s.normalized()
-	if s.State == "" {
-		return nil
-	}
-	payload := &availabilityPayload{
-		State: string(s.State),
-	}
-	if s.Reason != "" && s.Reason != availabilityReasonUnknown {
-		payload.Reason = string(s.Reason)
-	}
-	if !s.ResetAt.IsZero() {
-		payload.ResetAt = s.ResetAt.Unix()
-	}
-	return payload
-}
-
-type unifiedRateLimitStatus string
-
-const (
-	unifiedRateLimitStatusAllowed        unifiedRateLimitStatus = "allowed"
-	unifiedRateLimitStatusAllowedWarning unifiedRateLimitStatus = "allowed_warning"
-	unifiedRateLimitStatusRejected       unifiedRateLimitStatus = "rejected"
-)
-
-type unifiedRateLimitInfo struct {
-	Status                unifiedRateLimitStatus
-	ResetAt               time.Time
-	RepresentativeClaim   string
-	FallbackAvailable     bool
-	OverageStatus         string
-	OverageResetAt        time.Time
-	OverageDisabledReason string
-}
-
-func (s unifiedRateLimitInfo) normalized() unifiedRateLimitInfo {
-	if s.Status == "" {
-		s.Status = unifiedRateLimitStatusAllowed
 	}
 	return s
 }

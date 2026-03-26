@@ -120,8 +120,6 @@ type Credential interface {
 	markUpstreamRejected()
 	markTemporarilyBlocked(reason availabilityReason, resetAt time.Time)
 	availabilityStatus() availabilityStatus
-	rateLimitSnapshots() []rateLimitSnapshot
-	activeLimitID() string
 	earliestReset() time.Time
 	unavailableError() error
 

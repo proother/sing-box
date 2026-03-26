@@ -35,12 +35,6 @@ type availabilityStatus struct {
 	ResetAt time.Time
 }
 
-type availabilityPayload struct {
-	State   string `json:"state"`
-	Reason  string `json:"reason,omitempty"`
-	ResetAt int64  `json:"reset_at,omitempty"`
-}
-
 func (s availabilityStatus) normalized() availabilityStatus {
 	if s.State == "" {
 		s.State = availabilityStateUnknown
@@ -49,20 +43,6 @@ func (s availabilityStatus) normalized() availabilityStatus {
 		s.Reason = availabilityReasonUnknown
 	}
 	return s
-}
-
-func (s availabilityStatus) toPayload() *availabilityPayload {
-	s = s.normalized()
-	payload := &availabilityPayload{
-		State: string(s.State),
-	}
-	if s.Reason != "" && s.Reason != availabilityReasonUnknown {
-		payload.Reason = string(s.Reason)
-	}
-	if !s.ResetAt.IsZero() {
-		payload.ResetAt = s.ResetAt.Unix()
-	}
-	return payload
 }
 
 type creditsSnapshot struct {

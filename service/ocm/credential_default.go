@@ -544,26 +544,6 @@ func (c *defaultCredential) availabilityStatus() availabilityStatus {
 	return c.state.currentAvailability()
 }
 
-func (c *defaultCredential) rateLimitSnapshots() []rateLimitSnapshot {
-	c.stateAccess.RLock()
-	defer c.stateAccess.RUnlock()
-	if len(c.state.rateLimitSnapshots) == 0 {
-		return nil
-	}
-	snapshots := make([]rateLimitSnapshot, 0, len(c.state.rateLimitSnapshots))
-	for _, snapshot := range c.state.rateLimitSnapshots {
-		snapshots = append(snapshots, cloneRateLimitSnapshot(snapshot))
-	}
-	sortRateLimitSnapshots(snapshots)
-	return snapshots
-}
-
-func (c *defaultCredential) activeLimitID() string {
-	c.stateAccess.RLock()
-	defer c.stateAccess.RUnlock()
-	return c.state.activeLimitID
-}
-
 func (c *defaultCredential) unavailableError() error {
 	c.stateAccess.RLock()
 	defer c.stateAccess.RUnlock()

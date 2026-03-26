@@ -333,7 +333,7 @@ func (s *Service) handleWebSocket(
 	var firstRealRequestOnce sync.Once
 	var waitGroup sync.WaitGroup
 
-	waitGroup.Add(3)
+	waitGroup.Add(2)
 	go func() {
 		defer waitGroup.Done()
 		defer session.Close()
@@ -343,11 +343,6 @@ func (s *Service) handleWebSocket(
 		defer waitGroup.Done()
 		defer session.Close()
 		s.proxyWebSocketUpstreamToClient(ctx, upstreamReadWriter, clientConn, &clientWriteAccess, selectedCredential, modelChannel, username, weeklyCycleHint)
-	}()
-	go func() {
-		defer waitGroup.Done()
-		defer session.Close()
-		s.pushWebSocketAggregatedStatus(ctx, clientConn, &clientWriteAccess, session.closed, firstRealRequest, provider, userConfig)
 	}()
 	waitGroup.Wait()
 }
@@ -550,171 +545,6 @@ func (s *Service) handleWebSocketErrorEvent(data []byte, selectedCredential Cred
 	selectedCredential.updateStateFromHeaders(headers)
 	resetAt := parseOCMRateLimitResetFromHeaders(headers)
 	selectedCredential.markRateLimited(resetAt)
-}
-
-func writeWebSocketAggregatedStatus(clientConn net.Conn, clientWriteAccess *sync.Mutex, status aggregatedStatus) error {
-	clientWriteAccess.Lock()
-	defer clientWriteAccess.Unlock()
-	for _, data := range buildSyntheticRateLimitsEvents(status) {
-		if err := wsutil.WriteServerMessage(clientConn, ws.OpText, data); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Service) pushWebSocketAggregatedStatus(ctx context.Context, clientConn net.Conn, clientWriteAccess *sync.Mutex, sessionClosed <-chan struct{}, firstRealRequest <-chan struct{}, provider credentialProvider, userConfig *option.OCMUser) {
-	subscription, done, err := s.statusObserver.Subscribe()
-	if err != nil {
-		return
-	}
-	defer s.statusObserver.UnSubscribe(subscription)
-
-	var last aggregatedStatus
-	hasLast := false
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-done:
-			return
-		case <-sessionClosed:
-			return
-		case <-firstRealRequest:
-			current := s.computeAggregatedUtilization(provider, userConfig)
-			err = writeWebSocketAggregatedStatus(clientConn, clientWriteAccess, current)
-			if err != nil {
-				return
-			}
-			last = current
-			hasLast = true
-			firstRealRequest = nil
-		case <-subscription:
-			for {
-				select {
-				case <-subscription:
-				default:
-					goto drained
-				}
-			}
-		drained:
-			if !hasLast {
-				continue
-			}
-			current := s.computeAggregatedUtilization(provider, userConfig)
-			if current.equal(last) {
-				continue
-			}
-			last = current
-			err = writeWebSocketAggregatedStatus(clientConn, clientWriteAccess, current)
-			if err != nil {
-				return
-			}
-		}
-	}
-}
-
-func buildSyntheticRateLimitsEvents(status aggregatedStatus) [][]byte {
-	type rateLimitWindow struct {
-		UsedPercent   float64 `json:"used_percent"`
-		WindowMinutes int64   `json:"window_minutes,omitempty"`
-		ResetAt       int64   `json:"reset_at,omitempty"`
-	}
-	type creditsEvent struct {
-		HasCredits bool   `json:"has_credits"`
-		Unlimited  bool   `json:"unlimited"`
-		Balance    string `json:"balance,omitempty"`
-	}
-	type eventPayload struct {
-		Type       string `json:"type"`
-		RateLimits struct {
-			Primary   *rateLimitWindow `json:"primary,omitempty"`
-			Secondary *rateLimitWindow `json:"secondary,omitempty"`
-		} `json:"rate_limits"`
-		MeteredLimitName string        `json:"metered_limit_name,omitempty"`
-		LimitName        string        `json:"limit_name,omitempty"`
-		Credits          *creditsEvent `json:"credits,omitempty"`
-		PlanWeight       float64       `json:"plan_weight,omitempty"`
-	}
-	buildEvent := func(snapshot rateLimitSnapshot, primary *rateLimitWindow, secondary *rateLimitWindow) []byte {
-		event := eventPayload{
-			Type:             "codex.rate_limits",
-			MeteredLimitName: snapshot.LimitID,
-			LimitName:        snapshot.LimitName,
-			PlanWeight:       status.totalWeight,
-		}
-		if event.MeteredLimitName == "" {
-			event.MeteredLimitName = "codex"
-		}
-		if event.LimitName == "" {
-			event.LimitName = strings.ReplaceAll(event.MeteredLimitName, "_", "-")
-		}
-		event.RateLimits.Primary = primary
-		event.RateLimits.Secondary = secondary
-		if snapshot.Credits != nil {
-			event.Credits = &creditsEvent{
-				HasCredits: snapshot.Credits.HasCredits,
-				Unlimited:  snapshot.Credits.Unlimited,
-				Balance:    snapshot.Credits.Balance,
-			}
-		}
-		data, _ := json.Marshal(event)
-		return data
-	}
-	defaultPrimary := &rateLimitWindow{
-		UsedPercent: status.fiveHourUtilization,
-		ResetAt:     resetToEpoch(status.fiveHourReset),
-	}
-	defaultSecondary := &rateLimitWindow{
-		UsedPercent: status.weeklyUtilization,
-		ResetAt:     resetToEpoch(status.weeklyReset),
-	}
-	events := make([][]byte, 0, 1+len(status.limits))
-	if snapshot := findSnapshotByLimitID(status.limits, "codex"); snapshot != nil {
-		primary := defaultPrimary
-		if snapshot.Primary != nil {
-			primary = &rateLimitWindow{
-				UsedPercent:   snapshot.Primary.UsedPercent,
-				WindowMinutes: snapshot.Primary.WindowMinutes,
-				ResetAt:       snapshot.Primary.ResetAt,
-			}
-		}
-		secondary := defaultSecondary
-		if snapshot.Secondary != nil {
-			secondary = &rateLimitWindow{
-				UsedPercent:   snapshot.Secondary.UsedPercent,
-				WindowMinutes: snapshot.Secondary.WindowMinutes,
-				ResetAt:       snapshot.Secondary.ResetAt,
-			}
-		}
-		events = append(events, buildEvent(*snapshot, primary, secondary))
-	} else {
-		events = append(events, buildEvent(rateLimitSnapshot{LimitID: "codex", LimitName: "codex"}, defaultPrimary, defaultSecondary))
-	}
-	for _, snapshot := range status.limits {
-		if snapshot.LimitID == "codex" {
-			continue
-		}
-		var primary *rateLimitWindow
-		if snapshot.Primary != nil {
-			primary = &rateLimitWindow{
-				UsedPercent:   snapshot.Primary.UsedPercent,
-				WindowMinutes: snapshot.Primary.WindowMinutes,
-				ResetAt:       snapshot.Primary.ResetAt,
-			}
-		}
-		var secondary *rateLimitWindow
-		if snapshot.Secondary != nil {
-			secondary = &rateLimitWindow{
-				UsedPercent:   snapshot.Secondary.UsedPercent,
-				WindowMinutes: snapshot.Secondary.WindowMinutes,
-				ResetAt:       snapshot.Secondary.ResetAt,
-			}
-		}
-		events = append(events, buildEvent(snapshot, primary, secondary))
-	}
-	return events
 }
 
 func (s *Service) handleWebSocketResponseCompleted(data []byte, usageTracker *AggregatedUsage, requestModel string, username string, weeklyCycleHint *WeeklyCycleHint) {

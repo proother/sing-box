@@ -13,19 +13,11 @@ import (
 )
 
 type statusPayload struct {
-	FiveHourUtilization   float64              `json:"five_hour_utilization"`
-	FiveHourReset         int64                `json:"five_hour_reset"`
-	WeeklyUtilization     float64              `json:"weekly_utilization"`
-	WeeklyReset           int64                `json:"weekly_reset"`
-	PlanWeight            float64              `json:"plan_weight"`
-	UnifiedStatus         string               `json:"unified_status,omitempty"`
-	UnifiedReset          int64                `json:"unified_reset,omitempty"`
-	RepresentativeClaim   string               `json:"representative_claim,omitempty"`
-	FallbackAvailable     bool                 `json:"fallback_available,omitempty"`
-	OverageStatus         string               `json:"overage_status,omitempty"`
-	OverageReset          int64                `json:"overage_reset,omitempty"`
-	OverageDisabledReason string               `json:"overage_disabled_reason,omitempty"`
-	Availability          *availabilityPayload `json:"availability,omitempty"`
+	FiveHourUtilization float64 `json:"five_hour_utilization"`
+	FiveHourReset       int64   `json:"five_hour_reset"`
+	WeeklyUtilization   float64 `json:"weekly_utilization"`
+	WeeklyReset         int64   `json:"weekly_reset"`
+	PlanWeight          float64 `json:"plan_weight"`
 }
 
 type aggregatedStatus struct {
@@ -34,7 +26,6 @@ type aggregatedStatus struct {
 	totalWeight         float64
 	fiveHourReset       time.Time
 	weeklyReset         time.Time
-	unifiedRateLimit    unifiedRateLimitInfo
 	availability        availabilityStatus
 }
 
@@ -50,27 +41,17 @@ func (s aggregatedStatus) equal(other aggregatedStatus) bool {
 }
 
 func (s aggregatedStatus) toPayload() statusPayload {
-	unified := s.unifiedRateLimit.normalized()
 	return statusPayload{
-		FiveHourUtilization:   s.fiveHourUtilization,
-		FiveHourReset:         resetToEpoch(s.fiveHourReset),
-		WeeklyUtilization:     s.weeklyUtilization,
-		WeeklyReset:           resetToEpoch(s.weeklyReset),
-		PlanWeight:            s.totalWeight,
-		UnifiedStatus:         string(unified.Status),
-		UnifiedReset:          resetToEpoch(unified.ResetAt),
-		RepresentativeClaim:   unified.RepresentativeClaim,
-		FallbackAvailable:     unified.FallbackAvailable,
-		OverageStatus:         unified.OverageStatus,
-		OverageReset:          resetToEpoch(unified.OverageResetAt),
-		OverageDisabledReason: unified.OverageDisabledReason,
-		Availability:          s.availability.toPayload(),
+		FiveHourUtilization: s.fiveHourUtilization,
+		FiveHourReset:       resetToEpoch(s.fiveHourReset),
+		WeeklyUtilization:   s.weeklyUtilization,
+		WeeklyReset:         resetToEpoch(s.weeklyReset),
+		PlanWeight:          s.totalWeight,
 	}
 }
 
 type aggregateInput struct {
 	availability availabilityStatus
-	unified      unifiedRateLimitInfo
 }
 
 func aggregateAvailability(inputs []aggregateInput) availabilityStatus {
@@ -133,7 +114,9 @@ func aggregateAvailability(inputs []aggregateInput) availabilityStatus {
 	}
 }
 
-func chooseRepresentativeClaim(status unifiedRateLimitStatus, fiveHourUtilization float64, fiveHourReset time.Time, weeklyUtilization float64, weeklyReset time.Time, now time.Time) string {
+func chooseRepresentativeClaim(fiveHourUtilization float64, fiveHourReset time.Time, weeklyUtilization float64, weeklyReset time.Time, now time.Time) string {
+	fiveHourWarning := claudeFiveHourWarning(fiveHourUtilization, fiveHourReset, now)
+	weeklyWarning := claudeWeeklyWarning(weeklyUtilization, weeklyReset, now)
 	type claimCandidate struct {
 		name        string
 		priority    int
@@ -142,15 +125,15 @@ func chooseRepresentativeClaim(status unifiedRateLimitStatus, fiveHourUtilizatio
 	candidateFor := func(name string, utilization float64, warning bool) claimCandidate {
 		priority := 0
 		switch {
-		case status == unifiedRateLimitStatusRejected && utilization >= 100:
+		case utilization >= 100:
 			priority = 2
 		case warning:
 			priority = 1
 		}
 		return claimCandidate{name: name, priority: priority, utilization: utilization}
 	}
-	five := candidateFor("5h", fiveHourUtilization, claudeFiveHourWarning(fiveHourUtilization, fiveHourReset, now))
-	weekly := candidateFor("7d", weeklyUtilization, claudeWeeklyWarning(weeklyUtilization, weeklyReset, now))
+	five := candidateFor("5h", fiveHourUtilization, fiveHourWarning)
+	weekly := candidateFor("7d", weeklyUtilization, weeklyWarning)
 	switch {
 	case five.priority > weekly.priority:
 		return five.name
@@ -167,53 +150,6 @@ func chooseRepresentativeClaim(status unifiedRateLimitStatus, fiveHourUtilizatio
 	default:
 		return "5h"
 	}
-}
-
-func aggregateUnifiedRateLimit(inputs []aggregateInput, fiveHourUtilization float64, fiveHourReset time.Time, weeklyUtilization float64, weeklyReset time.Time, availability availabilityStatus) unifiedRateLimitInfo {
-	now := time.Now()
-	info := unifiedRateLimitInfo{}
-	usableCount := 0
-	for _, input := range inputs {
-		if input.availability.State == availabilityStateUsable {
-			usableCount++
-		}
-		if input.unified.OverageStatus != "" && info.OverageStatus == "" {
-			info.OverageStatus = input.unified.OverageStatus
-			info.OverageResetAt = input.unified.OverageResetAt
-			info.OverageDisabledReason = input.unified.OverageDisabledReason
-		}
-		if input.unified.Status == unifiedRateLimitStatusRejected {
-			info.Status = unifiedRateLimitStatusRejected
-			if !input.unified.ResetAt.IsZero() && (info.ResetAt.IsZero() || input.unified.ResetAt.Before(info.ResetAt)) {
-				info.ResetAt = input.unified.ResetAt
-				info.RepresentativeClaim = input.unified.RepresentativeClaim
-			}
-		}
-	}
-	if info.Status == "" {
-		switch {
-		case availability.State == availabilityStateRateLimited || fiveHourUtilization >= 100 || weeklyUtilization >= 100:
-			info.Status = unifiedRateLimitStatusRejected
-			info.ResetAt = availability.ResetAt
-		case claudeFiveHourWarning(fiveHourUtilization, fiveHourReset, now) || claudeWeeklyWarning(weeklyUtilization, weeklyReset, now):
-			info.Status = unifiedRateLimitStatusAllowedWarning
-		default:
-			info.Status = unifiedRateLimitStatusAllowed
-		}
-	}
-	info.FallbackAvailable = usableCount > 0 && len(inputs) > 1
-	if info.RepresentativeClaim == "" {
-		info.RepresentativeClaim = chooseRepresentativeClaim(info.Status, fiveHourUtilization, fiveHourReset, weeklyUtilization, weeklyReset, now)
-	}
-	if info.ResetAt.IsZero() {
-		switch info.RepresentativeClaim {
-		case "7d":
-			info.ResetAt = weeklyReset
-		default:
-			info.ResetAt = fiveHourReset
-		}
-	}
-	return info.normalized()
 }
 
 func (s *Service) handleStatusEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -350,7 +286,6 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		}
 		visibleInputs = append(visibleInputs, aggregateInput{
 			availability: credential.availabilityStatus(),
-			unified:      credential.unifiedRateLimitState(),
 		})
 		if !credential.hasSnapshotData() {
 			continue
@@ -393,7 +328,6 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 			result.fiveHourUtilization = 100
 			result.weeklyUtilization = 100
 		}
-		result.unifiedRateLimit = aggregateUnifiedRateLimit(visibleInputs, result.fiveHourUtilization, result.fiveHourReset, result.weeklyUtilization, result.weeklyReset, availability)
 		return result
 	}
 	result := aggregatedStatus{
@@ -410,66 +344,55 @@ func (s *Service) computeAggregatedUtilization(provider credentialProvider, user
 		avgHours := totalWeightedHoursUntilWeeklyReset / totalWeeklyResetWeight
 		result.weeklyReset = now.Add(time.Duration(avgHours * float64(time.Hour)))
 	}
-	result.unifiedRateLimit = aggregateUnifiedRateLimit(visibleInputs, result.fiveHourUtilization, result.fiveHourReset, result.weeklyUtilization, result.weeklyReset, availability)
 	return result
 }
 
 func (s *Service) rewriteResponseHeaders(headers http.Header, provider credentialProvider, userConfig *option.CCMUser) {
+	for key := range headers {
+		if strings.HasPrefix(strings.ToLower(key), "anthropic-ratelimit-unified-") {
+			headers.Del(key)
+		}
+	}
 	status := s.computeAggregatedUtilization(provider, userConfig)
+	now := time.Now()
 	headers.Set("anthropic-ratelimit-unified-5h-utilization", strconv.FormatFloat(status.fiveHourUtilization/100, 'f', 6, 64))
 	headers.Set("anthropic-ratelimit-unified-7d-utilization", strconv.FormatFloat(status.weeklyUtilization/100, 'f', 6, 64))
 	if !status.fiveHourReset.IsZero() {
 		headers.Set("anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(status.fiveHourReset.Unix(), 10))
-	} else {
-		headers.Del("anthropic-ratelimit-unified-5h-reset")
 	}
 	if !status.weeklyReset.IsZero() {
 		headers.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(status.weeklyReset.Unix(), 10))
-	} else {
-		headers.Del("anthropic-ratelimit-unified-7d-reset")
 	}
 	if status.totalWeight > 0 {
 		headers.Set("X-CCM-Plan-Weight", strconv.FormatFloat(status.totalWeight, 'f', -1, 64))
 	}
-	headers.Set("anthropic-ratelimit-unified-status", string(status.unifiedRateLimit.normalized().Status))
-	if !status.unifiedRateLimit.ResetAt.IsZero() {
-		headers.Set("anthropic-ratelimit-unified-reset", strconv.FormatInt(status.unifiedRateLimit.ResetAt.Unix(), 10))
-	} else {
-		headers.Del("anthropic-ratelimit-unified-reset")
+	fiveHourWarning := claudeFiveHourWarning(status.fiveHourUtilization, status.fiveHourReset, now)
+	weeklyWarning := claudeWeeklyWarning(status.weeklyUtilization, status.weeklyReset, now)
+	switch {
+	case status.fiveHourUtilization >= 100 || status.weeklyUtilization >= 100 ||
+		status.availability.State == availabilityStateRateLimited:
+		headers.Set("anthropic-ratelimit-unified-status", "rejected")
+	case fiveHourWarning || weeklyWarning:
+		headers.Set("anthropic-ratelimit-unified-status", "allowed_warning")
+	default:
+		headers.Set("anthropic-ratelimit-unified-status", "allowed")
 	}
-	if status.unifiedRateLimit.RepresentativeClaim != "" {
-		headers.Set("anthropic-ratelimit-unified-representative-claim", status.unifiedRateLimit.RepresentativeClaim)
-	} else {
-		headers.Del("anthropic-ratelimit-unified-representative-claim")
+	claim := chooseRepresentativeClaim(status.fiveHourUtilization, status.fiveHourReset, status.weeklyUtilization, status.weeklyReset, now)
+	headers.Set("anthropic-ratelimit-unified-representative-claim", claim)
+	switch claim {
+	case "7d":
+		if !status.weeklyReset.IsZero() {
+			headers.Set("anthropic-ratelimit-unified-reset", strconv.FormatInt(status.weeklyReset.Unix(), 10))
+		}
+	default:
+		if !status.fiveHourReset.IsZero() {
+			headers.Set("anthropic-ratelimit-unified-reset", strconv.FormatInt(status.fiveHourReset.Unix(), 10))
+		}
 	}
-	if status.unifiedRateLimit.FallbackAvailable {
-		headers.Set("anthropic-ratelimit-unified-fallback", "available")
-	} else {
-		headers.Del("anthropic-ratelimit-unified-fallback")
-	}
-	if status.unifiedRateLimit.OverageStatus != "" {
-		headers.Set("anthropic-ratelimit-unified-overage-status", status.unifiedRateLimit.OverageStatus)
-	} else {
-		headers.Del("anthropic-ratelimit-unified-overage-status")
-	}
-	if !status.unifiedRateLimit.OverageResetAt.IsZero() {
-		headers.Set("anthropic-ratelimit-unified-overage-reset", strconv.FormatInt(status.unifiedRateLimit.OverageResetAt.Unix(), 10))
-	} else {
-		headers.Del("anthropic-ratelimit-unified-overage-reset")
-	}
-	if status.unifiedRateLimit.OverageDisabledReason != "" {
-		headers.Set("anthropic-ratelimit-unified-overage-disabled-reason", status.unifiedRateLimit.OverageDisabledReason)
-	} else {
-		headers.Del("anthropic-ratelimit-unified-overage-disabled-reason")
-	}
-	if claudeFiveHourWarning(status.fiveHourUtilization, status.fiveHourReset, time.Now()) || status.fiveHourUtilization >= 100 {
+	if fiveHourWarning || status.fiveHourUtilization >= 100 {
 		headers.Set("anthropic-ratelimit-unified-5h-surpassed-threshold", "true")
-	} else {
-		headers.Del("anthropic-ratelimit-unified-5h-surpassed-threshold")
 	}
-	if claudeWeeklyWarning(status.weeklyUtilization, status.weeklyReset, time.Now()) || status.weeklyUtilization >= 100 {
+	if weeklyWarning || status.weeklyUtilization >= 100 {
 		headers.Set("anthropic-ratelimit-unified-7d-surpassed-threshold", "true")
-	} else {
-		headers.Del("anthropic-ratelimit-unified-7d-surpassed-threshold")
 	}
 }

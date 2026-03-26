@@ -63,13 +63,6 @@ type credentialState struct {
 	availabilityReason        availabilityReason
 	availabilityResetAt       time.Time
 	lastKnownDataAt           time.Time
-	unifiedStatus             unifiedRateLimitStatus
-	unifiedResetAt            time.Time
-	representativeClaim       string
-	unifiedFallbackAvailable  bool
-	overageStatus             string
-	overageResetAt            time.Time
-	overageDisabledReason     string
 	accountUUID               string
 	accountType               string
 	rateLimitTier             string
@@ -125,7 +118,6 @@ type Credential interface {
 	markRateLimited(resetAt time.Time)
 	markUpstreamRejected()
 	availabilityStatus() availabilityStatus
-	unifiedRateLimitState() unifiedRateLimitInfo
 	earliestReset() time.Time
 	unavailableError() error
 
@@ -252,17 +244,6 @@ func (s credentialState) currentAvailability() availabilityStatus {
 	}
 }
 
-func (s credentialState) currentUnifiedRateLimit() unifiedRateLimitInfo {
-	return unifiedRateLimitInfo{
-		Status:                s.unifiedStatus,
-		ResetAt:               s.unifiedResetAt,
-		RepresentativeClaim:   s.representativeClaim,
-		FallbackAvailable:     s.unifiedFallbackAvailable,
-		OverageStatus:         s.overageStatus,
-		OverageResetAt:        s.overageResetAt,
-		OverageDisabledReason: s.overageDisabledReason,
-	}.normalized()
-}
 
 func parseRateLimitResetFromHeaders(headers http.Header) time.Time {
 	claim := headers.Get("anthropic-ratelimit-unified-representative-claim")
