@@ -656,7 +656,7 @@ func (c *externalCredential) pollUsage() {
 	response, err := c.doPollUsageRequest(ctx)
 	if err != nil {
 		c.logger.Debug("poll usage for ", c.tag, ": ", err)
-		c.clearPollFailures()
+		c.incrementPollFailures()
 		return
 	}
 	defer response.Body.Close()
@@ -664,35 +664,35 @@ func (c *externalCredential) pollUsage() {
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		c.logger.Debug("poll usage for ", c.tag, ": status ", response.StatusCode, " ", string(body))
-		c.clearPollFailures()
+		c.incrementPollFailures()
 		return
 	}
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		c.logger.Debug("poll usage for ", c.tag, ": read body: ", err)
-		c.clearPollFailures()
+		c.incrementPollFailures()
 		return
 	}
 	var rawFields map[string]json.RawMessage
 	err = json.Unmarshal(body, &rawFields)
 	if err != nil {
 		c.logger.Debug("poll usage for ", c.tag, ": decode: ", err)
-		c.clearPollFailures()
+		c.incrementPollFailures()
 		return
 	}
 	if rawFields["limits"] == nil && (rawFields["five_hour_utilization"] == nil || rawFields["five_hour_reset"] == nil ||
 		rawFields["weekly_utilization"] == nil || rawFields["weekly_reset"] == nil ||
 		rawFields["plan_weight"] == nil) {
 		c.logger.Error("poll usage for ", c.tag, ": invalid response")
-		c.clearPollFailures()
+		c.incrementPollFailures()
 		return
 	}
 	var statusResponse statusPayload
 	err = json.Unmarshal(body, &statusResponse)
 	if err != nil {
 		c.logger.Debug("poll usage for ", c.tag, ": decode: ", err)
-		c.clearPollFailures()
+		c.incrementPollFailures()
 		return
 	}
 
@@ -985,11 +985,16 @@ func (c *externalCredential) pollBackoff(baseInterval time.Duration) time.Durati
 	return baseInterval
 }
 
-func (c *externalCredential) clearPollFailures() {
+func (c *externalCredential) incrementPollFailures() {
 	c.stateAccess.Lock()
-	c.state.consecutivePollFailures = 0
-	c.checkTransitionLocked()
+	c.state.consecutivePollFailures++
+	c.state.setAvailability(availabilityStateTemporarilyBlocked, availabilityReasonPollFailed, time.Time{})
+	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
+	if shouldInterrupt {
+		c.interruptConnections()
+	}
+	c.emitStatusUpdate()
 }
 
 func (c *externalCredential) usageTrackerOrNil() *AggregatedUsage {

@@ -132,6 +132,14 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	provider.pollIfStale()
+	if userConfig != nil && userConfig.ExternalCredential != "" {
+		for _, credential := range s.allCredentials {
+			if credential.tagName() == userConfig.ExternalCredential && !credential.isUsable() {
+				credential.pollUsage()
+				break
+			}
+		}
+	}
 
 	selection := credentialSelectionForUser(userConfig)
 
