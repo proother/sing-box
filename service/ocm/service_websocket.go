@@ -342,7 +342,7 @@ func (s *Service) handleWebSocket(
 	go func() {
 		defer waitGroup.Done()
 		defer session.Close()
-		s.proxyWebSocketUpstreamToClient(ctx, upstreamReadWriter, clientConn, &clientWriteAccess, selectedCredential, modelChannel, username, weeklyCycleHint)
+		s.proxyWebSocketUpstreamToClient(ctx, upstreamReadWriter, clientConn, &clientWriteAccess, selectedCredential, modelChannel, username, weeklyCycleHint, provider, userConfig)
 	}()
 	go func() {
 		defer waitGroup.Done()
@@ -407,7 +407,7 @@ func (s *Service) proxyWebSocketClientToUpstream(ctx context.Context, clientConn
 	}
 }
 
-func (s *Service) proxyWebSocketUpstreamToClient(ctx context.Context, upstreamReadWriter io.ReadWriter, clientConn net.Conn, clientWriteAccess *sync.Mutex, selectedCredential Credential, modelChannel <-chan string, username string, weeklyCycleHint *WeeklyCycleHint) {
+func (s *Service) proxyWebSocketUpstreamToClient(ctx context.Context, upstreamReadWriter io.ReadWriter, clientConn net.Conn, clientWriteAccess *sync.Mutex, selectedCredential Credential, modelChannel <-chan string, username string, weeklyCycleHint *WeeklyCycleHint, provider credentialProvider, userConfig *option.OCMUser) {
 	usageTracker := selectedCredential.usageTrackerOrNil()
 	var requestModel string
 	for {
@@ -428,6 +428,8 @@ func (s *Service) proxyWebSocketUpstreamToClient(ctx context.Context, upstreamRe
 				switch event.Type {
 				case "codex.rate_limits":
 					s.handleWebSocketRateLimitsEvent(data, selectedCredential)
+					status := s.computeAggregatedUtilization(provider, userConfig)
+					writeWebSocketAggregatedStatus(clientConn, clientWriteAccess, status)
 					continue
 				case "error":
 					s.handleWebSocketErrorEvent(data, selectedCredential)
