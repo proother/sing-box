@@ -50,7 +50,10 @@ func resolveRefreshScopes(stored []string) string {
 	return strings.Join(stored, " ")
 }
 
-const ccmUserAgentFallback = "claude-code/2.1.72"
+const (
+	ccmRefreshUserAgent  = "axios/1.13.6"
+	ccmUserAgentFallback = "claude-code/2.1.85"
+)
 
 var (
 	ccmUserAgentOnce  sync.Once
@@ -215,7 +218,7 @@ func refreshToken(ctx context.Context, httpClient *http.Client, credentials *oau
 			return nil, err
 		}
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("User-Agent", ccmUserAgentValue)
+		request.Header.Set("User-Agent", ccmRefreshUserAgent)
 		return request, nil
 	})
 	if err != nil {
