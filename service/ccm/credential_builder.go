@@ -2,7 +2,6 @@ package ccm
 
 import (
 	"context"
-	"time"
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -48,7 +47,7 @@ func buildCredentialProviders(
 			if err != nil {
 				return nil, nil, err
 			}
-			providers[credentialOption.Tag] = newBalancerProvider(subCredentials, credentialOption.BalancerOptions.Strategy, time.Duration(credentialOption.BalancerOptions.PollInterval), credentialOption.BalancerOptions.RebalanceThreshold, logger)
+			providers[credentialOption.Tag] = newBalancerProvider(subCredentials, credentialOption.BalancerOptions.Strategy, credentialOption.BalancerOptions.RebalanceThreshold, logger)
 		}
 	}
 

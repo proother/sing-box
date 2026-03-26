@@ -112,7 +112,6 @@ type balancerProvider struct {
 	credentials          []Credential
 	strategy             string
 	roundRobinIndex      atomic.Uint64
-	pollInterval         time.Duration
 	rebalanceThreshold   float64
 	sessionAccess        sync.RWMutex
 	sessions             map[string]sessionEntry
@@ -125,14 +124,10 @@ func compositeCredentialSelectable(credential Credential) bool {
 	return !credential.ocmIsAPIKeyMode()
 }
 
-func newBalancerProvider(credentials []Credential, strategy string, pollInterval time.Duration, rebalanceThreshold float64, logger log.ContextLogger) *balancerProvider {
-	if pollInterval <= 0 {
-		pollInterval = defaultPollInterval
-	}
+func newBalancerProvider(credentials []Credential, strategy string, rebalanceThreshold float64, logger log.ContextLogger) *balancerProvider {
 	return &balancerProvider{
 		credentials:          credentials,
 		strategy:             strategy,
-		pollInterval:         pollInterval,
 		rebalanceThreshold:   rebalanceThreshold,
 		sessions:             make(map[string]sessionEntry),
 		credentialInterrupts: make(map[credentialInterruptKey]credentialInterruptEntry),
@@ -410,14 +405,14 @@ func (p *balancerProvider) pollIfStale() {
 	p.interruptAccess.Unlock()
 
 	for _, credential := range p.credentials {
-		if time.Since(credential.lastUpdatedTime()) > credential.pollBackoff(p.pollInterval) {
+		if time.Since(credential.lastUpdatedTime()) > credential.pollBackoff(defaultPollInterval) {
 			credential.pollUsage()
 		}
 	}
 }
 
 func (p *balancerProvider) pollCredentialIfStale(credential Credential) {
-	if time.Since(credential.lastUpdatedTime()) > credential.pollBackoff(p.pollInterval) {
+	if time.Since(credential.lastUpdatedTime()) > credential.pollBackoff(defaultPollInterval) {
 		credential.pollUsage()
 	}
 }

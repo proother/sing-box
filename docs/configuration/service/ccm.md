@@ -104,8 +104,7 @@ A single OAuth credential file. The `type` field can be omitted (defaults to `de
   "tag": "pool",
   "type": "balancer",
   "strategy": "",
-  "credentials": ["a", "b"],
-  "poll_interval": "60s"
+  "credentials": ["a", "b"]
 }
 ```
 
@@ -113,7 +112,6 @@ Assigns sessions to default credentials based on the selected strategy. Sessions
 
 - `strategy`: Selection strategy. One of `least_used` `round_robin` `random` `fallback`. `least_used` will be used by default.
 - `credentials`: ==Required== List of default credential tags.
-- `poll_interval`: How often to poll upstream usage API. Default `60s`.
 
 ##### Fallback Strategy
 
@@ -122,15 +120,13 @@ Assigns sessions to default credentials based on the selected strategy. Sessions
   "tag": "backup",
   "type": "balancer",
   "strategy": "fallback",
-  "credentials": ["a", "b"],
-  "poll_interval": "30s"
+  "credentials": ["a", "b"]
 }
 ```
 
 A balancer with `strategy: "fallback"` uses credentials in order. It falls through to the next when the current one is exhausted.
 
 - `credentials`: ==Required== Ordered list of default credential tags.
-- `poll_interval`: How often to poll upstream usage API. Default `60s`.
 
 ##### External Credential
 
@@ -144,8 +140,7 @@ A balancer with `strategy: "fallback"` uses credentials in order. It falls throu
   "token": "",
   "reverse": false,
   "detour": "",
-  "usages_path": "",
-  "poll_interval": "30m"
+  "usages_path": ""
 }
 ```
 
@@ -158,7 +153,6 @@ Proxies requests through a remote CCM instance instead of using a local OAuth cr
 - `reverse`: Enable connector mode. Requires `url`. A connector dials out to `/ccm/v1/reverse` on the remote instance and cannot serve local requests directly. When `url` is set without `reverse`, the credential proxies requests through the remote instance normally and prefers an established reverse connection when one is available.
 - `detour`: Outbound tag for connecting to the remote instance.
 - `usages_path`: Optional usage tracking file.
-- `poll_interval`: How often to poll the remote status endpoint. Default `30m`.
 
 #### usages_path
 
@@ -290,7 +284,6 @@ claude
         {
           "tag": "pool",
           "type": "balancer",
-          "poll_interval": "60s",
           "credentials": ["a", "b"]
         }
       ],

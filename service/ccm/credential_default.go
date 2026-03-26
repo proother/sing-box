@@ -26,8 +26,6 @@ import (
 	"github.com/sagernet/sing/common/observable"
 )
 
-var acquireCredentialLockFunc = acquireCredentialLock
-
 type claudeProfileSnapshot struct {
 	OAuthAccount     *claudeOAuthAccount
 	AccountType      string
@@ -56,6 +54,7 @@ type defaultCredential struct {
 	capWeekly          float64
 	usageTracker       *AggregatedUsage
 	forwardHTTPClient  *http.Client
+	acquireLock        func(string) (func(), error)
 	logger             log.ContextLogger
 	watcher            *fswatch.Watcher
 	watcherRetryAt     time.Time
@@ -122,6 +121,7 @@ func newDefaultCredential(ctx context.Context, tag string, options option.CCMDef
 		cap5h:             cap5h,
 		capWeekly:         capWeekly,
 		forwardHTTPClient: httpClient,
+		acquireLock:       acquireCredentialLock,
 		logger:            logger,
 		requestContext:    requestContext,
 		cancelRequests:    cancelRequests,
@@ -363,7 +363,11 @@ func (c *defaultCredential) tryRefreshCredentials(force bool) bool {
 	if !c.shouldAttemptRefresh(currentCredentials, force) {
 		return false
 	}
-	release, err := acquireCredentialLockFunc(c.configDir)
+	acquireLock := c.acquireLock
+	if acquireLock == nil {
+		acquireLock = acquireCredentialLock
+	}
+	release, err := acquireLock(c.configDir)
 	if err != nil {
 		c.logger.Debug("acquire credential lock for ", c.tag, ": ", err)
 		return false

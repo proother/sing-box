@@ -104,8 +104,7 @@ Claude Code OAuth 凭据文件的路径。
   "tag": "pool",
   "type": "balancer",
   "strategy": "",
-  "credentials": ["a", "b"],
-  "poll_interval": "60s"
+  "credentials": ["a", "b"]
 }
 ```
 
@@ -113,7 +112,6 @@ Claude Code OAuth 凭据文件的路径。
 
 - `strategy`：选择策略。可选值：`least_used` `round_robin` `random` `fallback`。默认使用 `least_used`。
 - `credentials`：==必填== 默认凭据标签列表。
-- `poll_interval`：轮询上游使用 API 的间隔。默认 `60s`。
 
 ##### 回退策略
 
@@ -122,15 +120,13 @@ Claude Code OAuth 凭据文件的路径。
   "tag": "backup",
   "type": "balancer",
   "strategy": "fallback",
-  "credentials": ["a", "b"],
-  "poll_interval": "30s"
+  "credentials": ["a", "b"]
 }
 ```
 
 将 `strategy` 设为 `fallback` 的均衡凭据会按顺序使用凭据。当前凭据耗尽后切换到下一个。
 
 - `credentials`：==必填== 有序的默认凭据标签列表。
-- `poll_interval`：轮询上游使用 API 的间隔。默认 `60s`。
 
 ##### 外部凭据
 
@@ -144,8 +140,7 @@ Claude Code OAuth 凭据文件的路径。
   "token": "",
   "reverse": false,
   "detour": "",
-  "usages_path": "",
-  "poll_interval": "30m"
+  "usages_path": ""
 }
 ```
 
@@ -158,7 +153,6 @@ Claude Code OAuth 凭据文件的路径。
 - `reverse`：启用连接器模式。要求设置 `url`。启用后，此凭据会主动拨出到远程实例的 `/ccm/v1/reverse`，且不能直接为本地请求提供服务。当设置了 `url` 但未启用 `reverse` 时，此凭据会正常通过远程实例转发请求，并在反向连接建立后优先使用该反向连接。
 - `detour`：用于连接远程实例的出站标签。
 - `usages_path`：可选的使用跟踪文件。
-- `poll_interval`：轮询远程状态端点的间隔。默认 `30m`。
 
 #### usages_path
 
@@ -290,7 +284,6 @@ claude
         {
           "tag": "pool",
           "type": "balancer",
-          "poll_interval": "60s",
           "credentials": ["a", "b"]
         }
       ],

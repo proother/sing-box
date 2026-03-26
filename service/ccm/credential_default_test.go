@@ -31,13 +31,9 @@ func TestGetAccessTokenReturnsExistingTokenWhenLockFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	originalLockFunc := acquireCredentialLockFunc
-	acquireCredentialLockFunc = func(string) (func(), error) {
+	credential.acquireLock = func(string) (func(), error) {
 		return nil, errors.New("locked")
 	}
-	t.Cleanup(func() {
-		acquireCredentialLockFunc = originalLockFunc
-	})
 
 	token, err := credential.getAccessToken()
 	if err != nil {

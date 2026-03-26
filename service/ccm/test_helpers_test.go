@@ -85,6 +85,7 @@ func newTestDefaultCredential(t *testing.T, credentialPath string, transport htt
 		cap5h:              99,
 		capWeekly:          99,
 		forwardHTTPClient:  &http.Client{Transport: transport},
+		acquireLock:        acquireCredentialLock,
 		logger:             log.NewNOPFactory().Logger(),
 		requestContext:     requestContext,
 		cancelRequests:     cancelRequests,

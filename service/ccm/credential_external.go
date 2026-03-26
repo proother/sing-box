@@ -38,7 +38,6 @@ type externalCredential struct {
 	state             credentialState
 	stateAccess       sync.RWMutex
 	pollAccess        sync.Mutex
-	pollInterval      time.Duration
 	usageTracker      *AggregatedUsage
 	logger            log.ContextLogger
 
@@ -113,18 +112,12 @@ func externalCredentialReversePath(parsedURL *url.URL, endpointPath string) stri
 }
 
 func newExternalCredential(ctx context.Context, tag string, options option.CCMExternalCredentialOptions, logger log.ContextLogger) (*externalCredential, error) {
-	pollInterval := time.Duration(options.PollInterval)
-	if pollInterval <= 0 {
-		pollInterval = 30 * time.Minute
-	}
-
 	requestContext, cancelRequests := context.WithCancel(context.Background())
 	reverseContext, reverseCancel := context.WithCancel(context.Background())
 
 	credential := &externalCredential{
 		tag:            tag,
 		token:          options.Token,
-		pollInterval:   pollInterval,
 		logger:         logger,
 		requestContext: requestContext,
 		cancelRequests: cancelRequests,
@@ -355,9 +348,9 @@ func (c *externalCredential) markRateLimited(resetAt time.Time) {
 }
 
 func (c *externalCredential) markUpstreamRejected() {
-	c.logger.Warn("upstream rejected credential ", c.tag, ", marking unavailable for ", log.FormatDuration(c.pollInterval))
+	c.logger.Warn("upstream rejected credential ", c.tag, ", marking unavailable for ", log.FormatDuration(defaultPollInterval))
 	c.stateAccess.Lock()
-	c.state.upstreamRejectedUntil = time.Now().Add(c.pollInterval)
+	c.state.upstreamRejectedUntil = time.Now().Add(defaultPollInterval)
 	c.state.setAvailability(availabilityStateTemporarilyBlocked, availabilityReasonUpstreamRejected, c.state.upstreamRejectedUntil)
 	shouldInterrupt := c.checkTransitionLocked()
 	c.stateAccess.Unlock()
