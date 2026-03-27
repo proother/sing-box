@@ -170,9 +170,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Read body for model extraction and retry buffer when JSON replay is useful.
 	var bodyBytes []byte
+	var requestMetadata requestLogMetadata
 	var requestModel string
-	var requestServiceTier string
-	if r.Body != nil && (shouldTrackUsage || canRetryRequest) {
+	if r.Body != nil && (isNew || shouldTrackUsage || canRetryRequest) {
 		mediaType, _, parseErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		isJSONRequest := parseErr == nil && (mediaType == "application/json" || strings.HasSuffix(mediaType, "+json"))
 		if isJSONRequest {
@@ -182,33 +182,14 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeJSONError(w, r, http.StatusInternalServerError, "api_error", "failed to read request body")
 				return
 			}
-			var request struct {
-				Model       string `json:"model"`
-				ServiceTier string `json:"service_tier"`
-			}
-			if json.Unmarshal(bodyBytes, &request) == nil {
-				requestModel = request.Model
-				requestServiceTier = request.ServiceTier
-			}
+			requestMetadata = parseRequestLogMetadata(bodyBytes)
+			requestModel = requestMetadata.Model
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 	}
 
 	if isNew {
-		logParts := []any{"assigned credential ", selectedCredential.tagName()}
-		if sessionID != "" {
-			logParts = append(logParts, " for session ", sessionID)
-		}
-		if username != "" {
-			logParts = append(logParts, " by user ", username)
-		}
-		if requestModel != "" {
-			logParts = append(logParts, ", model=", requestModel)
-		}
-		if requestServiceTier == "priority" {
-			logParts = append(logParts, ", fast")
-		}
-		s.logger.DebugContext(ctx, logParts...)
+		s.logger.DebugContext(ctx, buildAssignedCredentialLogParts(selectedCredential.tagName(), sessionID, username, requestMetadata)...)
 	}
 
 	requestContext := selectedCredential.wrapRequestContext(ctx)

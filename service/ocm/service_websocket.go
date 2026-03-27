@@ -50,10 +50,9 @@ func (s *webSocketSession) Close() {
 }
 
 type webSocketResponseCreateRequest struct {
-	Type        string `json:"type"`
-	Model       string `json:"model"`
-	ServiceTier string `json:"service_tier"`
-	Generate    *bool  `json:"generate"`
+	requestLogPayload
+	Type     string `json:"type"`
+	Generate *bool  `json:"generate"`
 }
 
 func parseWebSocketResponseCreateRequest(data []byte) (webSocketResponseCreateRequest, bool) {
@@ -364,18 +363,7 @@ func (s *Service) proxyWebSocketClientToUpstream(ctx context.Context, clientConn
 				isWarmup := request.isWarmup()
 				if !isWarmup && isNew && !logged {
 					logged = true
-					logParts := []any{"assigned credential ", selectedCredential.tagName()}
-					if sessionID != "" {
-						logParts = append(logParts, " for session ", sessionID)
-					}
-					if username != "" {
-						logParts = append(logParts, " by user ", username)
-					}
-					logParts = append(logParts, ", model=", request.Model)
-					if request.ServiceTier == "priority" {
-						logParts = append(logParts, ", fast")
-					}
-					s.logger.DebugContext(ctx, logParts...)
+					s.logger.DebugContext(ctx, buildAssignedCredentialLogParts(selectedCredential.tagName(), sessionID, username, request.metadata())...)
 				}
 				if !isWarmup && selectedCredential.usageTrackerOrNil() != nil {
 					select {
