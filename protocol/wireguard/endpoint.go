@@ -129,7 +129,7 @@ func (w *Endpoint) Close() error {
 	return w.endpoint.Close()
 }
 
-func (w *Endpoint) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
+func (w *Endpoint) PrepareConnection(ctx context.Context, network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
 	var ipVersion uint8
 	if !destination.IsIPv6() {
 		ipVersion = 4

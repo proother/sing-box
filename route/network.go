@@ -393,6 +393,9 @@ func (r *NetworkManager) AutoRedirectOutputMark() uint32 {
 }
 
 func (r *NetworkManager) AutoRedirectOutputMarkFunc() control.Func {
+	if !C.IsLinux || C.IsAndroid {
+		return nil
+	}
 	return func(network, address string, conn syscall.RawConn) error {
 		if r.autoRedirectOutputMark == 0 {
 			return nil

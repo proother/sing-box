@@ -245,6 +245,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		inbound.autoRedirect, err = tun.NewAutoRedirect(tun.AutoRedirectOptions{
 			TunOptions:             &inbound.tunOptions,
 			Context:                ctx,
+			ConnContext:            log.ContextWithNewID,
 			Handler:                (*autoRedirectHandler)(inbound),
 			Logger:                 logger,
 			NetworkMonitor:         networkManager.NetworkMonitor(),
@@ -257,7 +258,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		if err != nil {
 			return nil, E.Cause(err, "initialize auto-redirect")
 		}
-		if !C.IsAndroid {
+		if C.IsLinux {
 			inbound.tunOptions.AutoRedirectMarkMode = true
 			err = networkManager.RegisterAutoRedirectOutputMark(inbound.tunOptions.AutoRedirectOutputMark)
 			if err != nil {
@@ -453,7 +454,7 @@ func (t *Inbound) Close() error {
 	)
 }
 
-func (t *Inbound) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
+func (t *Inbound) PrepareConnection(ctx context.Context, network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
 	var ipVersion uint8
 	if !destination.IsIPv6() {
 		ipVersion = 4
@@ -511,21 +512,35 @@ func (t *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 
 type autoRedirectHandler Inbound
 
-func (t *autoRedirectHandler) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
+func autoRedirectProcessInfoFromContext(ctx context.Context) *adapter.ConnectionOwner {
+	metadata := tun.AutoRedirectMetadataFromContext(ctx)
+	if metadata == nil {
+		return nil
+	}
+	return &adapter.ConnectionOwner{
+		ProcessID:   metadata.ProcessID,
+		ProcessPath: metadata.ProcessPath,
+		UserId:      metadata.UserId,
+	}
+}
+
+func (t *autoRedirectHandler) PrepareConnection(ctx context.Context, network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
 	var ipVersion uint8
 	if !destination.IsIPv6() {
 		ipVersion = 4
 	} else {
 		ipVersion = 6
 	}
-	routeDestination, err := t.router.PreMatch(adapter.InboundContext{
+	metadata := adapter.InboundContext{
 		Inbound:     t.tag,
 		InboundType: C.TypeTun,
 		IPVersion:   ipVersion,
 		Network:     network,
 		Source:      source,
 		Destination: destination,
-	}, routeContext, timeout, true)
+		ProcessInfo: autoRedirectProcessInfoFromContext(ctx),
+	}
+	routeDestination, err := t.router.PreMatch(metadata, routeContext, timeout, true)
 	if err != nil {
 		switch {
 		case rule.IsBypassed(err):
@@ -542,12 +557,12 @@ func (t *autoRedirectHandler) PrepareConnection(network string, source M.Socksad
 }
 
 func (t *autoRedirectHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
-	ctx = log.ContextWithNewID(ctx)
 	var metadata adapter.InboundContext
 	metadata.Inbound = t.tag
 	metadata.InboundType = C.TypeTun
 	metadata.Source = source
 	metadata.Destination = destination
+	metadata.ProcessInfo = autoRedirectProcessInfoFromContext(ctx)
 
 	t.logger.InfoContext(ctx, "inbound redirect connection from ", metadata.Source)
 	t.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
