@@ -107,7 +107,7 @@ func (c *defaultCredential) reloadCredentials(force bool) error {
 	}
 
 	c.absorbCredentials(credentials)
-	return nil
+	return c.refreshCredentialsIfNeeded(false)
 }
 
 func (c *defaultCredential) markCredentialsUnavailable(err error) error {

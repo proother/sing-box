@@ -14,14 +14,15 @@ func TestGetAccessTokenMarksUnavailableWhenLockFails(t *testing.T) {
 
 	directory := t.TempDir()
 	credentialPath := filepath.Join(directory, ".credentials.json")
-	writeTestCredentials(t, credentialPath, &oauthCredentials{
+	credentials := &oauthCredentials{
 		AccessToken:      "old-token",
 		RefreshToken:     "refresh-token",
-		ExpiresAt:        time.Now().Add(-time.Minute).UnixMilli(),
+		ExpiresAt:        time.Now().Add(time.Hour).UnixMilli(),
 		Scopes:           []string{"user:profile", "user:inference"},
 		SubscriptionType: optionalStringPointer("max"),
 		RateLimitTier:    optionalStringPointer("default_claude_max_20x"),
-	})
+	}
+	writeTestCredentials(t, credentialPath, credentials)
 
 	credential := newTestDefaultCredential(t, credentialPath, roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		t.Fatal("refresh should not be attempted when lock acquisition fails")
@@ -30,6 +31,11 @@ func TestGetAccessTokenMarksUnavailableWhenLockFails(t *testing.T) {
 	if err := credential.reloadCredentials(true); err != nil {
 		t.Fatal(err)
 	}
+
+	expiredCredentials := cloneCredentials(credentials)
+	expiredCredentials.ExpiresAt = time.Now().Add(-time.Minute).UnixMilli()
+	writeTestCredentials(t, credentialPath, expiredCredentials)
+	credential.absorbCredentials(expiredCredentials)
 
 	credential.acquireLock = func(string) (func(), error) {
 		return nil, errors.New("permission denied")
@@ -49,12 +55,13 @@ func TestGetAccessTokenMarksUnavailableOnUnwritableFile(t *testing.T) {
 
 	directory := t.TempDir()
 	credentialPath := filepath.Join(directory, ".credentials.json")
-	writeTestCredentials(t, credentialPath, &oauthCredentials{
+	credentials := &oauthCredentials{
 		AccessToken:  "old-token",
 		RefreshToken: "refresh-token",
-		ExpiresAt:    time.Now().Add(-time.Minute).UnixMilli(),
+		ExpiresAt:    time.Now().Add(time.Hour).UnixMilli(),
 		Scopes:       []string{"user:profile", "user:inference"},
-	})
+	}
+	writeTestCredentials(t, credentialPath, credentials)
 
 	credential := newTestDefaultCredential(t, credentialPath, roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		t.Fatal("refresh should not be attempted when file is not writable")
@@ -63,6 +70,11 @@ func TestGetAccessTokenMarksUnavailableOnUnwritableFile(t *testing.T) {
 	if err := credential.reloadCredentials(true); err != nil {
 		t.Fatal(err)
 	}
+
+	expiredCredentials := cloneCredentials(credentials)
+	expiredCredentials.ExpiresAt = time.Now().Add(-time.Minute).UnixMilli()
+	writeTestCredentials(t, credentialPath, expiredCredentials)
+	credential.absorbCredentials(expiredCredentials)
 
 	os.Chmod(credentialPath, 0o444)
 	t.Cleanup(func() { os.Chmod(credentialPath, 0o644) })

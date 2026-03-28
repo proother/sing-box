@@ -422,6 +422,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if shouldRetry {
 			recovered := false
+			var recoverErr error
 			if defaultCred, ok := selectedCredential.(*defaultCredential); ok {
 				failedAccessToken := ""
 				currentCredentials := defaultCred.currentCredentials()
@@ -429,7 +430,16 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					failedAccessToken = currentCredentials.AccessToken
 				}
 				s.logger.WarnContext(ctx, "upstream auth failure from ", selectedCredential.tagName(), ", reloading credentials and retrying")
-				recovered = defaultCred.recoverAuthFailure(failedAccessToken)
+				recovered, recoverErr = defaultCred.recoverAuthFailure(failedAccessToken)
+			}
+			if recoverErr != nil {
+				response.Body.Close()
+				if isHardRefreshFailure(recoverErr) || selectedCredential.unavailableError() != nil {
+					writeCredentialUnavailableError(w, r, provider, selectedCredential, selection, "credential became unavailable during auth recovery")
+					return
+				}
+				writeJSONError(w, r, http.StatusBadGateway, "api_error", E.Cause(recoverErr, "auth recovery").Error())
+				return
 			}
 			if recovered {
 				response.Body.Close()
