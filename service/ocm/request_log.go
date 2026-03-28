@@ -1,6 +1,12 @@
 package ocm
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
+)
 
 type requestLogMetadata struct {
 	Model           string
@@ -8,37 +14,57 @@ type requestLogMetadata struct {
 	ReasoningEffort string
 }
 
-type requestLogReasoning struct {
-	Effort string `json:"effort"`
+type legacyReasoningEffortPayload struct {
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
-type requestLogPayload struct {
-	Model           string               `json:"model"`
-	ServiceTier     string               `json:"service_tier"`
-	Reasoning       *requestLogReasoning `json:"reasoning"`
-	ReasoningEffort string               `json:"reasoning_effort"`
-}
-
-func (p requestLogPayload) metadata() requestLogMetadata {
-	metadata := requestLogMetadata{
-		Model:       p.Model,
-		ServiceTier: p.ServiceTier,
+func requestLogMetadataFromChatCompletionRequest(request openai.ChatCompletionNewParams) requestLogMetadata {
+	return requestLogMetadata{
+		Model:           string(request.Model),
+		ServiceTier:     string(request.ServiceTier),
+		ReasoningEffort: string(request.ReasoningEffort),
 	}
-	if p.Reasoning != nil {
-		metadata.ReasoningEffort = p.Reasoning.Effort
+}
+
+func requestLogMetadataFromResponsesRequest(request responses.ResponseNewParams, legacyReasoningEffort string) requestLogMetadata {
+	metadata := requestLogMetadata{
+		Model:       string(request.Model),
+		ServiceTier: string(request.ServiceTier),
+	}
+	if request.Reasoning.Effort != "" {
+		metadata.ReasoningEffort = string(request.Reasoning.Effort)
 	}
 	if metadata.ReasoningEffort == "" {
-		metadata.ReasoningEffort = p.ReasoningEffort
+		metadata.ReasoningEffort = legacyReasoningEffort
 	}
 	return metadata
 }
 
-func parseRequestLogMetadata(data []byte) requestLogMetadata {
-	var payload requestLogPayload
-	if json.Unmarshal(data, &payload) != nil {
+func parseLegacyReasoningEffort(data []byte) string {
+	var legacy legacyReasoningEffortPayload
+	if json.Unmarshal(data, &legacy) != nil {
+		return ""
+	}
+	return legacy.ReasoningEffort
+}
+
+func parseRequestLogMetadata(path string, data []byte) requestLogMetadata {
+	switch {
+	case path == "/v1/chat/completions":
+		var request openai.ChatCompletionNewParams
+		if json.Unmarshal(data, &request) != nil {
+			return requestLogMetadata{}
+		}
+		return requestLogMetadataFromChatCompletionRequest(request)
+	case strings.HasPrefix(path, "/v1/responses"):
+		var request responses.ResponseNewParams
+		if json.Unmarshal(data, &request) != nil {
+			return requestLogMetadata{}
+		}
+		return requestLogMetadataFromResponsesRequest(request, parseLegacyReasoningEffort(data))
+	default:
 		return requestLogMetadata{}
 	}
-	return payload.metadata()
 }
 
 func buildAssignedCredentialLogParts(credentialTag string, sessionID string, username string, metadata requestLogMetadata) []any {

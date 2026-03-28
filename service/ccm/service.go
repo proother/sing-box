@@ -21,6 +21,8 @@ import (
 	"github.com/sagernet/sing/common/observable"
 	aTLS "github.com/sagernet/sing/common/tls"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	anthropicconstant "github.com/anthropics/anthropic-sdk-go/shared/constant"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -32,23 +34,12 @@ func RegisterService(registry *boxService.Registry) {
 	boxService.Register[option.CCMServiceOptions](registry, C.TypeCCM, NewService)
 }
 
-type errorResponse struct {
-	Type      string       `json:"type"`
-	Error     errorDetails `json:"error"`
-	RequestID string       `json:"request_id,omitempty"`
-}
-
-type errorDetails struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-}
-
 func writeJSONError(w http.ResponseWriter, r *http.Request, statusCode int, errorType string, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(errorResponse{
-		Type: "error",
-		Error: errorDetails{
+	json.NewEncoder(w).Encode(anthropic.ErrorResponse{
+		Type: anthropicconstant.Error("").Default(),
+		Error: anthropic.ErrorObjectUnion{
 			Type:    errorType,
 			Message: message,
 		},

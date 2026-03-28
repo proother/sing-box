@@ -22,6 +22,7 @@ import (
 	aTLS "github.com/sagernet/sing/common/tls"
 
 	"github.com/go-chi/chi/v5"
+	openaishared "github.com/openai/openai-go/v3/shared"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
@@ -31,13 +32,7 @@ func RegisterService(registry *boxService.Registry) {
 }
 
 type errorResponse struct {
-	Error errorDetails `json:"error"`
-}
-
-type errorDetails struct {
-	Type    string `json:"type"`
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message"`
+	Error openaishared.ErrorObject `json:"error"`
 }
 
 func writeJSONError(w http.ResponseWriter, r *http.Request, statusCode int, errorType string, message string) {
@@ -49,10 +44,11 @@ func writeJSONErrorWithCode(w http.ResponseWriter, r *http.Request, statusCode i
 	w.WriteHeader(statusCode)
 
 	json.NewEncoder(w).Encode(errorResponse{
-		Error: errorDetails{
+		Error: openaishared.ErrorObject{
 			Type:    errorType,
 			Code:    errorCode,
 			Message: message,
+			Param:   "",
 		},
 	})
 }

@@ -23,6 +23,8 @@ import (
 	"github.com/sagernet/ws/wsutil"
 
 	"github.com/openai/openai-go/v3/responses"
+	openaishared "github.com/openai/openai-go/v3/shared"
+	openaiconstant "github.com/openai/openai-go/v3/shared/constant"
 )
 
 type webSocketSession struct {
@@ -50,9 +52,38 @@ func (s *webSocketSession) Close() {
 }
 
 type webSocketResponseCreateRequest struct {
-	requestLogPayload
+	responses.ResponseNewParams
+	legacyReasoningEffortPayload
 	Type     string `json:"type"`
 	Generate *bool  `json:"generate"`
+}
+
+func (r *webSocketResponseCreateRequest) UnmarshalJSON(data []byte) error {
+	type requestEnvelope struct {
+		Type     string `json:"type"`
+		Generate *bool  `json:"generate"`
+		legacyReasoningEffortPayload
+	}
+
+	var envelope requestEnvelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+
+	var params responses.ResponseNewParams
+	if err := json.Unmarshal(data, &params); err != nil {
+		return err
+	}
+
+	r.ResponseNewParams = params
+	r.legacyReasoningEffortPayload = envelope.legacyReasoningEffortPayload
+	r.Type = envelope.Type
+	r.Generate = envelope.Generate
+	return nil
+}
+
+func (r webSocketResponseCreateRequest) metadata() requestLogMetadata {
+	return requestLogMetadataFromResponsesRequest(r.ResponseNewParams, r.ReasoningEffort)
 }
 
 func parseWebSocketResponseCreateRequest(data []byte) (webSocketResponseCreateRequest, bool) {
@@ -60,7 +91,7 @@ func parseWebSocketResponseCreateRequest(data []byte) (webSocketResponseCreateRe
 	if json.Unmarshal(data, &request) != nil {
 		return webSocketResponseCreateRequest{}, false
 	}
-	if request.Type != "response.create" || request.Model == "" {
+	if request.Type != string(openaiconstant.ResponseCreate("").Default()) || request.Model == "" {
 		return webSocketResponseCreateRequest{}, false
 	}
 	return request, true
@@ -509,11 +540,9 @@ func (s *Service) handleWebSocketRateLimitsEvent(data []byte, selectedCredential
 
 func (s *Service) handleWebSocketErrorEvent(data []byte, selectedCredential Credential) {
 	var errorEvent struct {
-		StatusCode int               `json:"status_code"`
-		Headers    map[string]string `json:"headers"`
-		Error      struct {
-			Code string `json:"code"`
-		} `json:"error"`
+		StatusCode int                      `json:"status_code"`
+		Headers    map[string]string        `json:"headers"`
+		Error      openaishared.ErrorObject `json:"error"`
 	}
 	err := json.Unmarshal(data, &errorEvent)
 	if err != nil {

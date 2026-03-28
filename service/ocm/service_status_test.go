@@ -13,19 +13,21 @@ import (
 )
 
 type testCredential struct {
-	tag          string
-	external     bool
-	available    bool
-	usable       bool
-	hasData      bool
-	fiveHour     float64
-	weekly       float64
-	fiveHourCapV float64
-	weeklyCapV   float64
-	weight       float64
-	fiveReset    time.Time
-	weeklyReset  time.Time
-	availability availabilityStatus
+	tag           string
+	external      bool
+	available     bool
+	usable        bool
+	hasData       bool
+	fiveHour      float64
+	weekly        float64
+	fiveHourCapV  float64
+	weeklyCapV    float64
+	weight        float64
+	fiveReset     time.Time
+	weeklyReset   time.Time
+	availability  availabilityStatus
+	lastHeaders   http.Header
+	rateLimitedAt time.Time
 }
 
 func (c *testCredential) tagName() string              { return c.tag }
@@ -40,19 +42,23 @@ func (c *testCredential) weeklyCap() float64           { return c.weeklyCapV }
 func (c *testCredential) planWeight() float64          { return c.weight }
 func (c *testCredential) weeklyResetTime() time.Time   { return c.weeklyReset }
 func (c *testCredential) fiveHourResetTime() time.Time { return c.fiveReset }
-func (c *testCredential) markRateLimited(time.Time)    {}
-func (c *testCredential) markUpstreamRejected()        {}
+func (c *testCredential) markRateLimited(resetAt time.Time) {
+	c.rateLimitedAt = resetAt
+}
+func (c *testCredential) markUpstreamRejected() {}
 func (c *testCredential) markTemporarilyBlocked(reason availabilityReason, resetAt time.Time) {
 	c.availability = availabilityStatus{State: availabilityStateTemporarilyBlocked, Reason: reason, ResetAt: resetAt}
 }
 func (c *testCredential) availabilityStatus() availabilityStatus { return c.availability }
-func (c *testCredential) earliestReset() time.Time        { return c.fiveReset }
-func (c *testCredential) unavailableError() error         { return nil }
-func (c *testCredential) getAccessToken() (string, error) { return "", nil }
+func (c *testCredential) earliestReset() time.Time               { return c.fiveReset }
+func (c *testCredential) unavailableError() error                { return nil }
+func (c *testCredential) getAccessToken() (string, error)        { return "", nil }
 func (c *testCredential) buildProxyRequest(context.Context, *http.Request, []byte, http.Header) (*http.Request, error) {
 	return nil, nil
 }
-func (c *testCredential) updateStateFromHeaders(http.Header)                           {}
+func (c *testCredential) updateStateFromHeaders(headers http.Header) {
+	c.lastHeaders = headers.Clone()
+}
 func (c *testCredential) wrapRequestContext(context.Context) *credentialRequestContext { return nil }
 func (c *testCredential) interruptConnections()                                        {}
 func (c *testCredential) setOnBecameUnusable(func())                                   {}

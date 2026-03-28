@@ -182,7 +182,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeJSONError(w, r, http.StatusInternalServerError, "api_error", "failed to read request body")
 				return
 			}
-			requestMetadata = parseRequestLogMetadata(bodyBytes)
+			requestMetadata = parseRequestLogMetadata(path, bodyBytes)
 			requestModel = requestMetadata.Model
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}

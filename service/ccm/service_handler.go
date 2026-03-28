@@ -30,6 +30,12 @@ const (
 	weeklyWindowMinutes = weeklyWindowSeconds / 60
 )
 
+type ccmRequestMetadata struct {
+	Model         string
+	MessagesCount int
+	SessionID     string
+}
+
 func isExtendedContextRequest(betaHeader string) bool {
 	for _, feature := range strings.Split(betaHeader, ",") {
 		if strings.HasPrefix(strings.TrimSpace(feature), "context-1m") {
@@ -69,7 +75,7 @@ func extractWeeklyCycleHint(headers http.Header) *WeeklyCycleHint {
 	}
 }
 
-// extractCCMSessionID extracts the session ID from the request body's metadata.user_id field.
+// extractCCMSessionID extracts the session ID from the metadata.user_id field.
 //
 // Claude Code >= 2.1.78 (@anthropic-ai/claude-code) encodes user_id as:
 //
@@ -83,22 +89,12 @@ func extractWeeklyCycleHint(headers http.Header) *WeeklyCycleHint {
 //
 // ref: cli.js qs() — old metadata constructor
 //
-// Returns ("", nil) when body has no metadata.user_id (non-message endpoints).
+// Returns ("", nil) when userID is empty.
 // Returns error when user_id is present but in an unrecognized format.
-func extractCCMSessionID(bodyBytes []byte) (string, error) {
-	var body struct {
-		Metadata *struct {
-			UserID string `json:"user_id"`
-		} `json:"metadata"`
-	}
-	err := json.Unmarshal(bodyBytes, &body)
-	if err != nil {
+func extractCCMSessionID(userID string) (string, error) {
+	if userID == "" {
 		return "", nil
 	}
-	if body.Metadata == nil || body.Metadata.UserID == "" {
-		return "", nil
-	}
-	userID := body.Metadata.UserID
 
 	// v2.1.78+ JSON object format
 	var userIDObject struct {
@@ -115,6 +111,40 @@ func extractCCMSessionID(bodyBytes []byte) (string, error) {
 	}
 
 	return "", E.New("unrecognized metadata.user_id format: ", userID)
+}
+
+func extractCCMRequestMetadata(path string, bodyBytes []byte) (ccmRequestMetadata, error) {
+	switch path {
+	case "/v1/messages":
+		var request anthropic.MessageNewParams
+		if json.Unmarshal(bodyBytes, &request) != nil {
+			return ccmRequestMetadata{}, nil
+		}
+
+		metadata := ccmRequestMetadata{
+			Model:         string(request.Model),
+			MessagesCount: len(request.Messages),
+		}
+		if request.Metadata.UserID.Valid() {
+			sessionID, err := extractCCMSessionID(request.Metadata.UserID.Value)
+			if err != nil {
+				return ccmRequestMetadata{}, err
+			}
+			metadata.SessionID = sessionID
+		}
+		return metadata, nil
+	case "/v1/messages/count_tokens":
+		var request anthropic.MessageCountTokensParams
+		if json.Unmarshal(bodyBytes, &request) != nil {
+			return ccmRequestMetadata{}, nil
+		}
+		return ccmRequestMetadata{
+			Model:         string(request.Model),
+			MessagesCount: len(request.Messages),
+		}, nil
+	default:
+		return ccmRequestMetadata{}, nil
+	}
 }
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -178,22 +208,15 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var request struct {
-			Model    string                   `json:"model"`
-			Messages []anthropic.MessageParam `json:"messages"`
-		}
-		err = json.Unmarshal(bodyBytes, &request)
-		if err == nil {
-			requestModel = request.Model
-			messagesCount = len(request.Messages)
-		}
-
-		sessionID, err = extractCCMSessionID(bodyBytes)
+		requestMetadata, err := extractCCMRequestMetadata(r.URL.Path, bodyBytes)
 		if err != nil {
 			s.logger.ErrorContext(ctx, "invalid metadata format: ", err)
 			writeJSONError(w, r, http.StatusInternalServerError, "api_error", "invalid metadata format")
 			return
 		}
+		requestModel = requestMetadata.Model
+		messagesCount = requestMetadata.MessagesCount
+		sessionID = requestMetadata.SessionID
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
