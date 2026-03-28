@@ -372,9 +372,6 @@ func (c *externalCredential) earliestReset() time.Time {
 }
 
 func (c *externalCredential) unavailableError() error {
-	if c.reverse && c.connectorURL != nil {
-		return E.New("credential ", c.tag, " is unavailable: reverse connector credentials cannot serve local requests")
-	}
 	if c.baseURL == reverseProxyBaseURL {
 		session := c.getReverseSession()
 		if session == nil || session.IsClosed() {
