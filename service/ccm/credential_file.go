@@ -75,7 +75,7 @@ func (c *defaultCredential) retryCredentialReloadIfNeeded() {
 
 	err := c.ensureCredentialWatcher()
 	if err != nil {
-		c.logger.Debug("start credential watcher for ", c.tag, ": ", err)
+		c.logger.Error("start credential watcher for ", c.tag, ": ", err)
 	}
 	_ = c.reloadCredentials(false)
 }

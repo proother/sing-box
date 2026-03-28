@@ -598,7 +598,7 @@ func (c *externalCredential) pollUsage() {
 	ctx := c.getReverseContext()
 	response, err := c.doPollUsageRequest(ctx)
 	if err != nil {
-		c.logger.Debug("poll usage for ", c.tag, ": ", err)
+		c.logger.Error("poll usage for ", c.tag, ": ", err)
 		c.incrementPollFailures()
 		return
 	}
@@ -606,21 +606,21 @@ func (c *externalCredential) pollUsage() {
 
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
-		c.logger.Debug("poll usage for ", c.tag, ": status ", response.StatusCode, " ", string(body))
+		c.logger.Error("poll usage for ", c.tag, ": status ", response.StatusCode, " ", string(body))
 		c.incrementPollFailures()
 		return
 	}
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		c.logger.Debug("poll usage for ", c.tag, ": read body: ", err)
+		c.logger.Error("poll usage for ", c.tag, ": read body: ", err)
 		c.incrementPollFailures()
 		return
 	}
 	var rawFields map[string]json.RawMessage
 	err = json.Unmarshal(body, &rawFields)
 	if err != nil {
-		c.logger.Debug("poll usage for ", c.tag, ": decode: ", err)
+		c.logger.Error("poll usage for ", c.tag, ": decode: ", err)
 		c.incrementPollFailures()
 		return
 	}
@@ -634,7 +634,7 @@ func (c *externalCredential) pollUsage() {
 	var statusResponse statusPayload
 	err = json.Unmarshal(body, &statusResponse)
 	if err != nil {
-		c.logger.Debug("poll usage for ", c.tag, ": decode: ", err)
+		c.logger.Error("poll usage for ", c.tag, ": decode: ", err)
 		c.incrementPollFailures()
 		return
 	}

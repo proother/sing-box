@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestGetAccessTokenReturnsExistingTokenWhenLockFails(t *testing.T) {
+func TestGetAccessTokenMarksUnavailableWhenLockFails(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
@@ -32,15 +32,47 @@ func TestGetAccessTokenReturnsExistingTokenWhenLockFails(t *testing.T) {
 	}
 
 	credential.acquireLock = func(string) (func(), error) {
-		return nil, errors.New("locked")
+		return nil, errors.New("permission denied")
 	}
 
-	token, err := credential.getAccessToken()
-	if err != nil {
+	_, err := credential.getAccessToken()
+	if err == nil {
+		t.Fatal("expected error when lock acquisition fails, got nil")
+	}
+	if credential.isUsable() {
+		t.Fatal("credential should be marked unavailable after lock failure")
+	}
+}
+
+func TestGetAccessTokenMarksUnavailableOnUnwritableFile(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	credentialPath := filepath.Join(directory, ".credentials.json")
+	writeTestCredentials(t, credentialPath, &oauthCredentials{
+		AccessToken:  "old-token",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Minute).UnixMilli(),
+		Scopes:       []string{"user:profile", "user:inference"},
+	})
+
+	credential := newTestDefaultCredential(t, credentialPath, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		t.Fatal("refresh should not be attempted when file is not writable")
+		return nil, nil
+	}))
+	if err := credential.reloadCredentials(true); err != nil {
 		t.Fatal(err)
 	}
-	if token != "old-token" {
-		t.Fatalf("expected old token, got %q", token)
+
+	os.Chmod(credentialPath, 0o444)
+	t.Cleanup(func() { os.Chmod(credentialPath, 0o644) })
+
+	_, err := credential.getAccessToken()
+	if err == nil {
+		t.Fatal("expected error when credential file is not writable, got nil")
+	}
+	if credential.isUsable() {
+		t.Fatal("credential should be marked unavailable after write permission failure")
 	}
 }
 
