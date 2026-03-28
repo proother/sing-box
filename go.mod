@@ -171,3 +171,5 @@ require (
 	lukechampine.com/blake3 v1.3.0 // indirect
 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
 )
+
+replace github.com/caddyserver/certmagic v0.25.2 => github.com/sagernet/certmagic v0.0.0-20260328164746-42c454dfd829
