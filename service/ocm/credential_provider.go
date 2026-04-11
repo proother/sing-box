@@ -342,6 +342,8 @@ func ocmPlanWeight(accountType string) float64 {
 	switch accountType {
 	case "pro":
 		return 10
+	case "prolite":
+		return 5
 	case "plus":
 		return 1
 	default:
