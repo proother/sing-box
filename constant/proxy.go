@@ -32,6 +32,8 @@ const (
 	TypeCCM                = "ccm"
 	TypeOCM                = "ocm"
 	TypeOOMKiller          = "oom-killer"
+	TypeUSBIPServer        = "usbip-server"
+	TypeUSBIPClient        = "usbip-client"
 	TypeACME               = "acme"
 	TypeCloudflareOriginCA = "cloudflare-origin-ca"
 )
